@@ -266,6 +266,66 @@ Hooks.on("renderItemChoiceFlow", (flow, element) => {
 });
 
 /* -------------------------------------------- */
+/*  Armor-dependent feat effects                */
+/* -------------------------------------------- */
+
+/**
+ * A transfer effect with the flag "flags.theia-feats.requires" is turned on and off with the armor its actor wears:
+ * "noHeavyArmor" (Speedster), "mediumArmor" (Medium Armor Master) or "noArmor".
+ */
+const ARMOR_RULES = {
+  noHeavyArmor: armor => armor?.system.type?.value !== "heavy",
+  mediumArmor: armor => armor?.system.type?.value === "medium",
+  noArmor: armor => !armor
+};
+const ARMOR_TYPES = ["light", "medium", "heavy"];
+const equippedArmor = actor => actor.items.find(i => (i.type === "equipment") && i.system.equipped
+  && ARMOR_TYPES.includes(i.system.type?.value));
+
+async function syncArmorEffects(actor) {
+  const armor = equippedArmor(actor);
+  for (const effect of actor.allApplicableEffects()) {
+    const rule = ARMOR_RULES[effect.getFlag(MODULE_ID, "requires")];
+    if (!rule) continue;
+    const disabled = !rule(armor);
+    if (effect.disabled !== disabled) await effect.update({ disabled });
+  }
+}
+const armorSyncs = new Map();
+function queueArmorSync(item) {
+  const actor = item?.parent;
+  if (!(actor instanceof Actor) || (game.users.activeGM !== game.user)) return;
+  if (!armorSyncs.has(actor.uuid)) armorSyncs.set(actor.uuid, foundry.utils.debounce(() => syncArmorEffects(actor), 100));
+  armorSyncs.get(actor.uuid)();
+}
+for (const hook of ["createItem", "updateItem", "deleteItem"]) Hooks.on(hook, queueArmorSync);
+
+/* -------------------------------------------- */
+/*  Elemental Adept damage type                 */
+/* -------------------------------------------- */
+
+/**
+ * Elemental Adept is chosen per damage type, and the Theia_Elemental_Adept macro reads the type from the feat's name,
+ * "Elemental Adept (Fire)". When the feat is added under its bare name, its owner chooses the type.
+ */
+const ELEMENTAL_TYPES = ["acid", "cold", "fire", "lightning", "thunder"];
+Hooks.on("createItem", async (item, options, userId) => {
+  if ((userId !== game.user.id) || !(item.parent instanceof Actor) || (item.system.identifier !== "elemental-adept")) return;
+  if (/\(\w+\)$/.test(item.name)) return;
+  const taken = item.parent.items.map(i => i.name.match(/^Elemental Adept \((\w+)\)$/i)?.[1]?.toLowerCase()).filter(Boolean);
+  const types = ELEMENTAL_TYPES.filter(t => !taken.includes(t));
+  if (!types.length) return;
+  const label = t => CONFIG.DND5E.damageTypes[t]?.label ?? t;
+  const type = await foundry.applications.api.DialogV2.wait({
+    window: { title: "Elemental Adept" },
+    content: "<p>Choose the damage type. Your spells ignore resistance to it, and a 1 on its damage dice counts as a 2.</p>",
+    buttons: types.map((t, i) => ({ action: t, label: label(t), default: i === 0 })),
+    rejectClose: false
+  });
+  if (type) await item.update({ name: `Elemental Adept (${label(type)})` });
+});
+
+/* -------------------------------------------- */
 /*  Setup                                       */
 /* -------------------------------------------- */
 
