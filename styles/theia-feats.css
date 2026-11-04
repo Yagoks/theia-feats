@@ -27,3 +27,6 @@
 .theia-feat-picker .detail .desc { flex: 1; }
 .theia-feat-picker .detail .hint { opacity: 0.7; }
 .theia-feat-picker .detail .choose { flex: none; }
+
+/* Button above an item choice's feat list */
+.theia-feat-open { width: 100%; margin: 4px 0 8px; }

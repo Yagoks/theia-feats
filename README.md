@@ -8,7 +8,7 @@ The level-up window asks for every option of a choice at once, but each request 
 
 ## Feat picker
 
-When dnd5e's Ability Score Improvement step browses for a feat, a quick picker opens instead of the compendium browser. It lists the feats of one compendium (setting **Feat compendium**, Class Features (Shared) by default) from its index, with search, category (Origin, General, Fighting Style, Epic Boon) and the character's prerequisites; unmet ones show why. A feat's description loads when it is selected. The Theia classes choose feats through their own "Feats" item choice instead, which the batched loads speed up.
+When dnd5e's Ability Score Improvement step browses for a feat, a quick picker opens instead of the compendium browser. It lists the feats of one compendium (setting **Feat compendium**, Class Features (Shared) by default) from its index, with search, category (Origin, General, Fighting Style, Epic Boon) and the character's prerequisites; unmet ones show why. A feat's description loads when it is selected. The Theia classes choose feats through their own "Feats" item choice, a checkbox per feat: a **Choose with the feat picker** button above it opens the picker over that choice's feats and ticks the one chosen.
 
 ## Prerequisites
 

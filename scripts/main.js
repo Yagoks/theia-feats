@@ -104,9 +104,10 @@ const DEFAULT_PACK = "forge-vtt-shared-compendiums-theia.item-3-class-features";
 const INDEX_FIELDS = ["system.type", "system.prerequisites", "system.requirements", "system.source", "flags.theia.prereqs"];
 
 class FeatPicker extends foundry.applications.api.ApplicationV2 {
-  constructor({ actor, level, resolve, ...options } = {}) {
+  constructor({ actor, level, pool, resolve, ...options } = {}) {
     super(options);
     this.actor = actor;
+    this.pool = pool ? new Set(pool) : null;
     this.level = level ?? actor?.system.details?.level ?? 0;
     this.resolve = resolve;
     this.view = { search: "", category: "", eligibleOnly: true, selected: null };
@@ -132,12 +133,29 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
     return this._entries;
   }
 
+  /** The feats to list: an item choice's pool when given, else every feat of the pack. */
+  async list() {
+    if (!this.pool) return FeatPicker.entries();
+    if (this._list) return this._list;
+    const byPack = new Map();
+    for (const uuid of this.pool) {
+      const { collection } = foundry.utils.parseUuid(uuid);
+      if (collection instanceof foundry.documents.collections.CompendiumCollection) byPack.set(collection, true);
+    }
+    const entries = [];
+    for (const pack of byPack.keys()) {
+      const index = await pack.getIndex({ fields: INDEX_FIELDS });
+      for (const e of index.values()) if (this.pool.has(e.uuid) && !/^Ability Score Improvement/i.test(e.name)) entries.push(e);
+    }
+    return (this._list = entries.sort((a, b) => a.name.localeCompare(b.name, game.i18n.lang)));
+  }
+
   get categories() {
     return CONFIG.DND5E.featureTypes.feat?.subtypes ?? {};
   }
 
   async _renderHTML() {
-    const entries = await FeatPicker.entries();
+    const entries = await this.list();
     const { search, category, eligibleOnly, selected } = this.view;
     const term = search.trim().toLowerCase();
     const rows = entries.map(e => ({ entry: e, unmet: this.actor ? unmetPrerequisites(this.actor, e, this.level) : [] }))
@@ -191,7 +209,7 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
   }
 
   async select(uuid) {
-    const entry = (await FeatPicker.entries()).find(e => e.uuid === uuid);
+    const entry = (await this.list()).find(e => e.uuid === uuid);
     const item = await fromUuid(uuid);
     if (!entry || !item) return;
     const description = await foundry.applications.ux.TextEditor.implementation.enrichHTML(item.system.description?.value ?? "", { relativeTo: item });
@@ -219,6 +237,33 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
     return new Promise(resolve => new FeatPicker({ ...options, resolve }).render({ force: true }));
   }
 }
+
+/**
+ * The Theia classes choose feats through an item choice ("Feats") whose pool lists every feat as a checkbox. Add a
+ * button that opens the feat picker over that pool (search, category, prerequisites) and ticks the chosen feat.
+ */
+Hooks.on("renderItemChoiceFlow", (flow, element) => {
+  const config = flow.advancement?.configuration;
+  if ((config?.type !== "feat") || !(config.pool?.length > 1) || element.querySelector(".theia-feat-open")) return;
+  const list = element.querySelector(".item-list.current-level");
+  if (!list) return;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "theia-feat-open";
+  button.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> Choose with the feat picker';
+  button.addEventListener("click", async () => {
+    const actor = flow.advancement.actor;
+    const uuid = await FeatPicker.choose({ actor, level: flow.featureLevel ?? actor?.system.details?.level, pool: config.pool.map(p => p.uuid) });
+    if (!uuid) return;
+    const box = element.querySelector(`dnd5e-checkbox[name="${uuid}"]`);
+    if (!box) return ui.notifications.warn("That feat can't be selected in this step.");
+    if (box.disabled) return ui.notifications.warn("No more feats can be selected in this step.");
+    box.checked = true;
+    box.dispatchEvent(new Event("change", { bubbles: true }));
+    box.closest("li")?.scrollIntoView({ block: "center" });
+  });
+  list.closest(".items-section")?.before(button);
+});
 
 /* -------------------------------------------- */
 /*  Setup                                       */
