@@ -1,0 +1,29 @@
+/* Theia Feats: feat picker */
+.theia-feat-picker .window-content { padding: 0; }
+.theia-feat-picker .theia-feat-body { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.theia-feat-picker .filters {
+  display: flex; gap: 8px; align-items: center; padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border, #7a7971);
+}
+.theia-feat-picker .filters input[type=search] { flex: 1; }
+.theia-feat-picker .filters select { width: 160px; }
+.theia-feat-picker .filters label { display: flex; gap: 4px; align-items: center; white-space: nowrap; font-size: var(--font-size-12, 12px); }
+.theia-feat-picker .columns { display: flex; flex: 1; min-height: 0; }
+.theia-feat-picker .list { flex: 0 0 46%; overflow-y: auto; margin: 0; padding: 4px 0; list-style: none; border-right: 1px solid var(--color-border, #7a7971); }
+.theia-feat-picker .theia-feat {
+  display: grid; grid-template-columns: 28px 1fr auto; gap: 2px 8px; align-items: center;
+  padding: 4px 10px; cursor: pointer;
+}
+.theia-feat-picker .theia-feat img { width: 28px; height: 28px; border: none; border-radius: 3px; grid-row: span 2; }
+.theia-feat-picker .theia-feat .tag { font-size: 11px; opacity: 0.7; }
+.theia-feat-picker .theia-feat .unmet-reason { grid-column: 2 / 4; font-size: 11px; color: var(--color-level-error, #c0392b); }
+.theia-feat-picker .theia-feat.unmet .name { opacity: 0.6; }
+.theia-feat-picker .theia-feat:hover { background: rgba(255, 255, 255, 0.06); }
+.theia-feat-picker .theia-feat.active { background: rgba(217, 165, 72, 0.18); }
+.theia-feat-picker .empty { padding: 12px; opacity: 0.7; }
+.theia-feat-picker .detail { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
+.theia-feat-picker .detail h3 { margin: 0; }
+.theia-feat-picker .detail .req { margin: 0; font-style: italic; opacity: 0.8; }
+.theia-feat-picker .detail .desc { flex: 1; }
+.theia-feat-picker .detail .hint { opacity: 0.7; }
+.theia-feat-picker .detail .choose { flex: none; }

@@ -1,0 +1,41 @@
+{
+  "id": "theia-feats",
+  "title": "Theia Feats",
+  "description": "Faster level-up choices for the Theia worlds (dnd5e): batched compendium loads, a quick feat picker for the Ability Score Improvement step, and item prerequisites.",
+  "version": "0.1.0",
+  "authors": [
+    {
+      "name": "Yagoks"
+    }
+  ],
+  "compatibility": {
+    "minimum": "14",
+    "verified": "14"
+  },
+  "relationships": {
+    "systems": [
+      {
+        "id": "dnd5e",
+        "type": "system",
+        "compatibility": {
+          "minimum": "6.0.0"
+        }
+      }
+    ],
+    "requires": [
+      {
+        "id": "lib-wrapper",
+        "type": "module"
+      }
+    ]
+  },
+  "esmodules": [
+    "scripts/main.js"
+  ],
+  "url": "https://github.com/Yagoks/theia-feats",
+  "manifest": "https://github.com/Yagoks/theia-feats/releases/latest/download/module.json",
+  "download": "https://github.com/Yagoks/theia-feats/releases/download/v0.1.0/module.zip",
+  "styles": [
+    "styles/theia-feats.css"
+  ]
+}
