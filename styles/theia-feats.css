@@ -35,5 +35,17 @@
 .theia-feat-picker .detail .hint { opacity: 0.7; }
 .theia-feat-picker .detail .choose { flex: none; }
 
-/* Button above an item choice's feat list */
-.theia-feat-open { width: 100%; margin: 4px 0 8px; }
+/* Feat picker inside the level-up window (in place of the item choice's checkbox list) */
+.theia-feat-inline { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 8px; }
+.theia-feat-inline .inline-chosen { font-size: var(--font-size-13, 13px); }
+.theia-feat-inline .inline-chosen a { cursor: pointer; margin-left: 6px; opacity: 0.8; }
+.theia-feat-inline .theia-feat-body { height: auto; }
+.theia-feat-inline .filters { flex-wrap: wrap; padding: 4px 0; }
+.theia-feat-inline .filters input[type=search] { flex: 1 1 100%; }
+.theia-feat-inline .filters select { flex: 1 1 30%; width: auto; }
+.theia-feat-inline .columns { flex-direction: column; }
+.theia-feat-inline .list { flex: none; max-height: 340px; border-right: none; border-bottom: 1px solid var(--color-border, #7a7971); }
+.theia-feat-inline .detail { flex: none; max-height: 300px; padding: 8px 4px; }
+
+/* Spell note in the level-up window */
+.theia-spell-note { margin: 8px 0 0; }

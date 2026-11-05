@@ -343,30 +343,94 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
 }
 
 /**
- * The Theia classes choose feats through an item choice ("Feats") whose pool lists every feat as a checkbox. Add a
- * button that opens the feat picker over that pool (search, category, prerequisites) and ticks the chosen feat.
+ * The Theia classes choose feats (and invocations, maneuvers...) through an item choice whose pool lists every option as
+ * a checkbox. For a pool of 9 or more, the checkbox list is hidden and the feat picker is shown in its place, inside the
+ * level-up window: search, filters, the options the character can take first and the others greyed out below. Taking an
+ * option ticks dnd5e's own (hidden) checkbox, so the advancement works as before.
  */
-Hooks.on("renderItemChoiceFlow", (flow, element) => {
+const INLINE_POOL_MIN = 9;
+Hooks.on("renderItemChoiceFlow", async (flow, element) => {
   const config = flow.advancement?.configuration;
-  if ((config?.type !== "feat") || !(config.pool?.length > 1) || element.querySelector(".theia-feat-open")) return;
-  const list = element.querySelector(".item-list.current-level");
-  if (!list) return;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "theia-feat-open";
-  button.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> Choose with the feat picker';
-  button.addEventListener("click", async () => {
-    const actor = flow.advancement.actor;
-    const uuid = await FeatPicker.choose({ actor, level: flow.featureLevel ?? actor?.system.details?.level, pool: config.pool.map(p => p.uuid) });
-    if (!uuid) return;
-    const box = element.querySelector(`dnd5e-checkbox[name="${uuid}"]`);
-    if (!box) return ui.notifications.warn("That feat can't be selected in this step.");
-    if (box.disabled) return ui.notifications.warn("No more feats can be selected in this step.");
-    box.checked = true;
+  if ((config?.type !== "feat") || !(config.pool?.length >= INLINE_POOL_MIN) || element.querySelector(".theia-feat-inline")) return;
+  const section = element.querySelector(".item-list.current-level")?.closest(".items-section");
+  if (!section) return;
+  section.style.display = "none";
+  const host = document.createElement("div");
+  host.className = "theia-feat-picker theia-feat-inline";
+  section.before(host);
+  // Give the level-up window room for the picker.
+  const app = foundry.applications.instances.get(element.closest(".application")?.id);
+  if (app && (app.position?.width ?? 0) < 620) app.setPosition({ width: 620 });
+
+  const actor = flow.advancement.actor;
+  const picker = new FeatPicker({ actor, level: flow.featureLevel ?? actor?.system.details?.level, pool: config.pool.map(p => p.uuid) });
+  // The flow re-renders when a box changes: keep the search and filters on the flow.
+  flow.theiaView ??= picker.view;
+  picker.view = flow.theiaView;
+  const esc = foundry.utils.escapeHTML;
+  const boxes = () => [...section.querySelectorAll(".item-list.current-level dnd5e-checkbox")];
+  const draw = async () => {
+    const focused = document.activeElement?.name;
+    const root = await picker._renderHTML();
+    const chosen = boxes().filter(b => b.checked);
+    const names = await Promise.all(chosen.map(b => fromUuid(b.name).then(d => d?.name ?? b.name)));
+    const head = document.createElement("div");
+    head.className = "inline-chosen";
+    head.innerHTML = chosen.length
+      ? `<strong>Chosen:</strong> ${names.map(esc).join(", ")} <a data-action="clear"><i class="fa-solid fa-xmark"></i> clear</a>`
+      : `<em>Choose ${esc(flow.advancement.title ?? "an option")} below, then take it.</em>`;
+    host.replaceChildren(head, root);
+    if (focused === "search") { const input = host.querySelector("input[name=search]"); input?.focus(); input?.setSelectionRange(input.value.length, input.value.length); }
+    bind();
+  };
+  picker.render = () => draw(); // select() re-renders through this
+  const tick = (uuid, checked) => {
+    const box = boxes().find(b => b.name === uuid);
+    if (!box) return ui.notifications.warn("That option can't be selected in this step.");
+    if (checked && box.disabled) return ui.notifications.warn("No more options can be selected in this step: clear one first.");
+    box.checked = checked;
     box.dispatchEvent(new Event("change", { bubbles: true }));
-    box.closest("li")?.scrollIntoView({ block: "center" });
-  });
-  list.closest(".items-section")?.before(button);
+  };
+  const bind = () => {
+    host.querySelector("input[name=search]")?.addEventListener("input", ev => { picker.view.search = ev.target.value; draw(); });
+    for (const name of ["category", "level", "prereq"]) host.querySelector(`select[name=${name}]`)?.addEventListener("change", ev => { picker.view[name] = ev.target.value; draw(); });
+    for (const li of host.querySelectorAll("li.theia-feat")) li.addEventListener("click", () => picker.select(li.dataset.uuid));
+    host.querySelector("button[data-action=choose]")?.addEventListener("click", () => { if (picker.view.selected) tick(picker.view.selected.uuid, true); });
+    host.querySelector("[data-action=clear]")?.addEventListener("click", () => { for (const b of boxes().filter(x => x.checked)) tick(b.name, false); });
+  };
+  await draw();
+});
+
+/**
+ * Level-up and spells: the Theia classes choose their spells in Spell Book. The level-up window says how many cantrips
+ * and prepared spells the new level adds, and when it finishes, Spell Book opens for the character to choose them.
+ */
+const SPELL_SCALES = { "cantrips-known": "cantrip", "prepared-spells": "prepared spell" };
+Hooks.on("renderScaleValueFlow", (flow, element) => {
+  const advancement = flow.advancement;
+  const kind = SPELL_SCALES[advancement?.configuration?.identifier];
+  if (!kind || element.querySelector(".theia-spell-note")) return;
+  const level = flow.level;
+  const now = Number(advancement.valueForLevel(level)?.value ?? 0);
+  const before = Number(advancement.valueForLevel(level - 1)?.value ?? 0);
+  const gain = now - before;
+  const note = document.createElement("p");
+  note.className = "theia-spell-note notes";
+  note.innerHTML = gain > 0
+    ? `<i class="fa-solid fa-book-sparkles"></i> <strong>+${gain} ${kind}${gain > 1 ? "s" : ""}</strong> (${before} → ${now}). You choose ${gain > 1 ? "them" : "it"} in the Spell Book, which opens when this level-up finishes.`
+    : `<i class="fa-solid fa-book"></i> ${now} ${kind}s at this level. You can change them in the Spell Book.`;
+  element.append(note);
+  if (gain > 0) {
+    const manager = foundry.applications.instances.get(element.closest(".application")?.id);
+    if (manager) manager.theiaSpellsGrow = true;
+  }
+});
+Hooks.on("dnd5e.advancementManagerComplete", manager => {
+  const actor = manager.actor;
+  const api = game.modules.get("spell-book")?.api;
+  if (!actor || !api?.openSpellBookForActor || !manager.theiaSpellsGrow) return;
+  ui.notifications.info(`${actor.name}: choose the new spells in the Spell Book.`);
+  setTimeout(() => api.openSpellBookForActor(actor), 500);
 });
 
 /* -------------------------------------------- */

@@ -8,7 +8,7 @@ The level-up window asks for every option of a choice at once, but each request 
 
 ## Feat picker
 
-When dnd5e's Ability Score Improvement step browses for a feat, a quick picker opens instead of the compendium browser. It lists the feats of one compendium (setting **Feat compendium**, Class Features (Shared) by default) from its index. The feats the character can take come first; the others are grouped below, greyed out, each with what it is missing. Filters: search by name, type (Origin, General, Fighting Style...), the level the feat needs, and the kind of prerequisite (none, level, ability score, lineage, feat or feature, proficiency, spellcasting, class). A feat's description loads when it is selected. The Theia classes choose feats through their own "Feats" item choice, a checkbox per feat: a **Choose with the feat picker** button above it opens the picker over that choice's feats and ticks the one chosen.
+When dnd5e's Ability Score Improvement step browses for a feat, a quick picker opens instead of the compendium browser. It lists the feats of one compendium (setting **Feat compendium**, Class Features (Shared) by default) from its index. The feats the character can take come first; the others are grouped below, greyed out, each with what it is missing. Filters: search by name, type (Origin, General, Fighting Style...), the level the feat needs, and the kind of prerequisite (none, level, ability score, lineage, feat or feature, proficiency, spellcasting, class). A feat's description loads when it is selected. In the level-up window, an item choice of feats (or invocations, maneuvers...) with 9 or more options shows the picker in place of dnd5e's checkbox list: search, filters, the options the character can take first and the others greyed out below. Taking one ticks dnd5e's own hidden checkbox, so the advancement works as before.
 
 ## Prerequisites
 
@@ -27,3 +27,7 @@ The Theia_Elemental_Adept macro reads the damage type from the feat's name, such
 ## Theia class spell lists
 
 The Theia classes have their own identifiers (`wizard-theia`, `shaman`, `magus`...), which Spell Book doesn't link to a spell list by itself. Their lists live in Spell Book's Custom Spell Lists pack (pages flagged `flags.theia.source`). When a character gains a Theia spellcasting class, or when the world opens, the active GM's client assigns that class's list through Spell Book's API, unless the class already has one.
+
+## Level-up and spells
+
+In the level-up window, the Cantrips Known and Prepared Spells steps say how many cantrips and spells the new level adds. When the level-up finishes with new ones, Spell Book opens for the character to choose them.
