@@ -67,16 +67,100 @@ function failedTheiaPrereqs(actor, itemData) {
   }).map(ruleLabel);
 }
 
+/*
+ * The Theia feats keep most prerequisites as text in "system.requirements", such as "6th-level, Charisma 15+" or
+ * "4th-Level + Cel'eros or Kitsune". Each part after the level is read as one kind (ability score, spellcasting,
+ * proficiency, fighting style, class, feat, lineage) and checked against the actor.
+ */
+const ABILITY_WORDS = { strength: "str", strenght: "str", dexterity: "dex", constitution: "con", intelligence: "int", wisdom: "wis", charisma: "cha" };
+const norm = s => String(s ?? "").toLowerCase().normalize("NFD").replace(/[^a-z]/g, "");
+const alternatives = s => s.split(/,\s*(?:or\s+)?|\s+or\s+/i).map(t => t.trim()).filter(Boolean);
+const PREREQ_KINDS = { level: "Level", ability: "Ability score", lineage: "Lineage", feat: "Feat or feature", proficiency: "Proficiency", spellcasting: "Spellcasting", class: "Class" };
+
+/** The parts of a requirements text after its level, each as { kind, label, test(actor) } (cached per text). */
+const partsCache = new Map();
+function requirementParts(text) {
+  if (partsCache.has(text)) return partsCache.get(text);
+  const rest = String(text ?? "").replace(/\d+(st|nd|rd|th)-level/ig, "");
+  const parts = [];
+  for (let raw of rest.split("+")) {
+    raw = raw.trim().replace(/^[,\s]+|[,\s]+$/g, "");
+    if (!raw || /^none$/i.test(raw)) continue;
+    for (const piece of /^feat,\s*/i.test(raw) ? [raw.replace(/^feat,\s*/i, "")] : [raw]) parts.push(readPart(piece));
+  }
+  return parts;
+}
+
+function readPart(label) {
+  const words = alternatives(label.replace(/\d+$/, ""));
+  const score = Number(label.match(/(\d+)\s*$/)?.[1]);
+  if (score && words.every(w => ABILITY_WORDS[w.toLowerCase()])) {
+    const keys = words.map(w => ABILITY_WORDS[w.toLowerCase()]);
+    return { kind: "ability", label: `${label}+`, test: a => keys.some(k => (a.system.abilities?.[k]?.value ?? 0) >= score) };
+  }
+  if (/spellcasting|pact magic/i.test(label)) {
+    return { kind: "spellcasting", label, test: a => Object.keys(a.spellcastingClasses ?? {}).length > 0 || (a.system.spells?.pact?.max ?? 0) > 0 };
+  }
+  if (/fighting style/i.test(label)) {
+    return { kind: "feat", label, test: a => a.items.some(i => i.type === "feat" && i.system.type?.subtype === "fightingStyle") };
+  }
+  if (/martial/i.test(label)) return { kind: "proficiency", label, test: a => a.system.traits?.weaponProf?.value?.has("mar") };
+  if (/shield/i.test(label)) return { kind: "proficiency", label, test: a => a.system.traits?.armorProf?.value?.has("shl") };
+  const armor = label.match(/(light|medium|heavy) armor/i)?.[1]?.toLowerCase();
+  if (armor) return { kind: "proficiency", label, test: a => a.system.traits?.armorProf?.value?.has({ light: "lgt", medium: "med", heavy: "hvy" }[armor]) };
+  const skill = label.match(/proficiency with (.+)/i)?.[1];
+  const skillKey = skill && Object.entries(CONFIG.DND5E.skills).find(([, s]) => norm(s.label) === norm(skill))?.[0];
+  if (skillKey) return { kind: "proficiency", label, test: a => (a.system.skills?.[skillKey]?.value ?? 0) >= 1 };
+  const inParens = label.match(/^\((.+)\)$/)?.[1];
+  if (inParens) {
+    const classes = alternatives(inParens).map(norm);
+    return { kind: "class", label: inParens, test: a => Object.values(a.classes ?? {}).some(c => classes.includes(norm(c.name))) };
+  }
+  const featNames = new Set((FeatPicker._entries ?? []).map(e => norm(e.name)));
+  const options = alternatives(label);
+  if (options.some(o => featNames.has(norm(o)) || /^strike of the giants/i.test(o))) {
+    return { kind: "feat", label, test: a => options.some(o => a.items.some(i => norm(i.name) === norm(o))) };
+  }
+  // Anything else is a list of lineages: "Bugbear, Goblin or Hobgoblin", "Drac'nyr (Chromatic)".
+  const lineages = options.map(o => norm(o.replace(/\(.*?\)?$/, "")));
+  return { kind: "lineage", label, test: a => {
+    const race = norm(a.items.find(i => i.type === "race")?.name ?? a.system.details?.race?.name ?? a.system.details?.race);
+    return !!race && lineages.some(l => l && (race.includes(l) || l.includes(race)));
+  } };
+}
+
+/** The prerequisite kinds of a feat index entry (for the picker's filter). */
+/** The text parts that a feat's required items stand for (checked through the items instead). */
+function coveredParts(entry, parts) {
+  if (!entry.system?.prerequisites?.items?.length) return [];
+  return parts.filter(p => ["lineage", "feat", "spellcasting", "class"].includes(p.kind) && !/fighting style/i.test(p.label));
+}
+
+function prerequisiteKinds(entry) {
+  const parts = requirementParts(entry.system?.requirements);
+  const kinds = new Set(parts.map(p => p.kind));
+  if (entry.system?.prerequisites?.items?.length && !coveredParts(entry, parts).length) kinds.add("feat");
+  if ((entry.system?.prerequisites?.level ?? 0) > 1) kinds.add("level");
+  return kinds;
+}
+
+/** The level a feat needs (1 when none). */
+const featLevel = entry => Math.max(1, Number(entry.system?.prerequisites?.level) || 1);
+
 /** Every unmet prerequisite of a feat index entry for an actor at a level, as labels (empty when it can be taken). */
 function unmetPrerequisites(actor, entry, level) {
   const unmet = [];
   const prereqs = entry.system?.prerequisites ?? {};
   if (Number.isFinite(prereqs.level) && (level < prereqs.level)) unmet.push(`Level ${prereqs.level}`);
   const items = [...(prereqs.items ?? [])];
+  const parts = requirementParts(entry.system?.requirements);
+  const covered = coveredParts(entry, parts);
+  // The required items (a lineage, a feat, a feature) are named again in the text, which reads better than their ids.
   if (items.length && !items.some(i => actor.identifiedItems?.get(i)?.size)) {
-    unmet.push(items.map(i => dnd5e.registry.items.get(i)?.name ?? i).join(" or "));
+    unmet.push(covered.length ? covered.map(p => p.label).join(" · ") : items.map(i => dnd5e.registry.items.get(i)?.name ?? i).join(" or "));
   }
   if (!prereqs.repeatable && actor.sourcedItems?.get(entry.uuid)?.size) unmet.push("Already taken");
+  for (const part of parts) if (!covered.includes(part) && !part.test(actor)) unmet.push(part.label);
   unmet.push(...failedTheiaPrereqs(actor, entry));
   return unmet;
 }
@@ -110,7 +194,7 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
     this.pool = pool ? new Set(pool) : null;
     this.level = level ?? actor?.system.details?.level ?? 0;
     this.resolve = resolve;
-    this.view = { search: "", category: "", eligibleOnly: true, selected: null };
+    this.view = { search: "", category: "", level: "", prereq: "", selected: null };
   }
 
   static DEFAULT_OPTIONS = {
@@ -135,7 +219,8 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
 
   /** The feats to list: an item choice's pool when given, else every feat of the pack. */
   async list() {
-    if (!this.pool) return FeatPicker.entries();
+    const all = await FeatPicker.entries(); // also the feat names the requirements text is read against
+    if (!this.pool) return all;
     if (this._list) return this._list;
     const byPack = new Map();
     for (const uuid of this.pool) {
@@ -150,27 +235,40 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
     return (this._list = entries.sort((a, b) => a.name.localeCompare(b.name, game.i18n.lang)));
   }
 
-  get categories() {
-    return CONFIG.DND5E.featureTypes.feat?.subtypes ?? {};
+  /** Labels of the feat categories (feats) or class feature subtypes (maneuvers, invocations...) of the listed entries. */
+  categoryLabel(entry) {
+    const type = entry.system?.type ?? {};
+    const label = CONFIG.DND5E.featureTypes[type.value]?.subtypes?.[type.subtype];
+    return label ? game.i18n.localize(label) : "";
   }
 
   async _renderHTML() {
     const entries = await this.list();
-    const { search, category, eligibleOnly, selected } = this.view;
+    const { search, category, level, prereq, selected } = this.view;
     const term = search.trim().toLowerCase();
     const rows = entries.map(e => ({ entry: e, unmet: this.actor ? unmetPrerequisites(this.actor, e, this.level) : [] }))
-      .filter(({ entry, unmet }) => (!term || entry.name.toLowerCase().includes(term))
+      .filter(({ entry }) => (!term || entry.name.toLowerCase().includes(term))
         && (!category || entry.system?.type?.subtype === category)
-        && (!eligibleOnly || !unmet.length));
+        && (!level || featLevel(entry) === Number(level))
+        && (!prereq || (prereq === "none" ? !prerequisiteKinds(entry).size : prerequisiteKinds(entry).has(prereq))));
     const esc = foundry.utils.escapeHTML;
-    const options = Object.entries(this.categories).map(([k, label]) =>
-      `<option value="${k}" ${k === category ? "selected" : ""}>${esc(game.i18n.localize(label))}</option>`).join("");
-    const list = rows.map(({ entry, unmet }) => `
+    const sel = (value, current) => (String(value) === String(current) ? "selected" : "");
+    const categories = [...new Set(entries.map(e => e.system?.type?.subtype).filter(Boolean))]
+      .map(k => [k, this.categoryLabel(entries.find(e => e.system?.type?.subtype === k))]).sort((a, b) => a[1].localeCompare(b[1]));
+    const levels = [...new Set(entries.map(featLevel))].sort((a, b) => a - b);
+    const kinds = Object.entries(PREREQ_KINDS).filter(([k]) => entries.some(e => prerequisiteKinds(e).has(k)));
+    const item = ({ entry, unmet }) => `
       <li class="theia-feat ${unmet.length ? "unmet" : ""} ${entry.uuid === selected?.uuid ? "active" : ""}" data-uuid="${entry.uuid}">
         <img src="${entry.img}" alt=""><span class="name">${esc(entry.name)}</span>
-        <span class="tag">${esc(game.i18n.localize(this.categories[entry.system?.type?.subtype] ?? ""))}</span>
+        <span class="tag">${featLevel(entry) > 1 ? `Lv ${featLevel(entry)} · ` : ""}${esc(this.categoryLabel(entry))}</span>
         ${unmet.length ? `<span class="unmet-reason">${esc(unmet.join(" · "))}</span>` : ""}
-      </li>`).join("") || `<li class="empty">No feats match.</li>`;
+      </li>`;
+    const available = rows.filter(r => !r.unmet.length), unavailable = rows.filter(r => r.unmet.length);
+    let list = available.map(item).join("") || `<li class="empty">No feats ${esc(this.actor?.name ?? "")} can take match.</li>`;
+    if (unavailable.length) {
+      list += `<li class="group-header">Not available (${unavailable.length})</li>` + unavailable.map(item).join("");
+    }
+    if (this.actor && available.length) list = `<li class="group-header">Available (${available.length})</li>` + list;
     const detail = selected
       ? `<h3>${esc(selected.name)}</h3>${selected.requirements ? `<p class="req">${esc(selected.requirements)}</p>` : ""}
          <div class="desc">${selected.description}</div>
@@ -182,8 +280,13 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
     root.innerHTML = `
       <div class="filters">
         <input type="search" name="search" placeholder="Search feats" value="${esc(search)}">
-        <select name="category"><option value="">All categories</option>${options}</select>
-        <label><input type="checkbox" name="eligibleOnly" ${eligibleOnly ? "checked" : ""}> Only feats ${esc(this.actor?.name ?? "")} can take</label>
+        <select name="category" title="Type"><option value="">All types</option>
+          ${categories.map(([k, l]) => `<option value="${k}" ${sel(k, category)}>${esc(l || k)}</option>`).join("")}</select>
+        <select name="level" title="Level the feat needs"><option value="">Any level</option>
+          ${levels.map(l => `<option value="${l}" ${sel(l, level)}>Level ${l}</option>`).join("")}</select>
+        <select name="prereq" title="Prerequisite"><option value="">Any prerequisite</option>
+          <option value="none" ${sel("none", prereq)}>No prerequisite</option>
+          ${kinds.map(([k, l]) => `<option value="${k}" ${sel(k, prereq)}>${esc(l)}</option>`).join("")}</select>
       </div>
       <div class="columns"><ul class="list">${list}</ul><section class="detail">${detail}</section></div>`;
     return root;
@@ -202,8 +305,9 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
   _onRender() {
     const el = this.element;
     el.querySelector("input[name=search]").addEventListener("input", ev => { this.view.search = ev.target.value; this.render(); });
-    el.querySelector("select[name=category]").addEventListener("change", ev => { this.view.category = ev.target.value; this.render(); });
-    el.querySelector("input[name=eligibleOnly]").addEventListener("change", ev => { this.view.eligibleOnly = ev.target.checked; this.render(); });
+    for (const name of ["category", "level", "prereq"]) {
+      el.querySelector(`select[name=${name}]`).addEventListener("change", ev => { this.view[name] = ev.target.value; this.render(); });
+    }
     for (const li of el.querySelectorAll("li.theia-feat")) li.addEventListener("click", () => this.select(li.dataset.uuid));
     el.querySelector("button[data-action=choose]")?.addEventListener("click", () => this.choose());
   }
