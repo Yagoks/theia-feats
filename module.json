@@ -1,7 +1,7 @@
 {
   "id": "theia-feats",
   "title": "Theia Feats",
-  "description": "Faster level-up choices for the Theia worlds (dnd5e): batched compendium loads, a quick feat picker for the Ability Score Improvement step, and item prerequisites.",
+  "description": "Feats for the Theia worlds (dnd5e 6, Midi-QOL): a feat picker that shows what a character can take, Theia prerequisites, faster level-up choices, armor-dependent feat effects and reactions around saves and hit points.",
   "version": "0.1.0",
   "authors": [
     {
