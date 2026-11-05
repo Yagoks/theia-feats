@@ -502,6 +502,46 @@ Hooks.on("createActiveEffect", async effect => {
 });
 
 /* -------------------------------------------- */
+/*  Hit point thresholds                        */
+/* -------------------------------------------- */
+
+/**
+ * Run by the active GM when a creature's hit points change:
+ *  - Unbroken Body: dropped to 0 but not killed outright, its player may drop to 1 instead (1 per long rest).
+ *  - Anthropomorphic Constitution: reduced to 20 HP or less (and not 0), for 1 minute all damage it takes is reduced by
+ *    half its level (rounded down) + its Constitution modifier, minimum 1 (1 per long rest).
+ */
+Hooks.on("updateActor", async (actor, changes) => {
+  if (game.users.activeGM !== game.user) return;
+  const hp = foundry.utils.getProperty(changes, "system.attributes.hp.value");
+  if (hp === undefined) return;
+  const usesLeft = i => (i?.system.uses?.value ?? 0) > 0;
+  const spend = i => i.update({ "system.uses.spent": (i.system.uses.spent ?? 0) + 1 });
+
+  const unbroken = featNamed(actor, "Unbroken Body");
+  if ((hp === 0) && usesLeft(unbroken) && !actor.statuses.has("dead")) {
+    if (!await askOwner(actor, "Unbroken Body", `<p>${actor.name} drops to 0 hit points. Drop to 1 instead?</p>`)) return;
+    await spend(unbroken);
+    await actor.update({ "system.attributes.hp.value": 1 });
+    const down = actor.effects.filter(e => e.statuses.has("unconscious") || e.statuses.has("dead")).map(e => e.id);
+    if (down.length) await actor.deleteEmbeddedDocuments("ActiveEffect", down);
+    return sayAs(actor, `<strong>Unbroken Body</strong>: ${actor.name} stays on their feet with 1 hit point.`);
+  }
+
+  const anthro = featNamed(actor, "Anthropomorphic Constitution");
+  if ((hp > 0) && (hp <= 20) && usesLeft(anthro) && !actor.effects.some(e => e.name === "Anthropomorphic Constitution")) {
+    await spend(anthro);
+    await actor.createEmbeddedDocuments("ActiveEffect", [{
+      name: "Anthropomorphic Constitution", img: anthro.img, origin: anthro.uuid, transfer: false, duration: { seconds: 60, rounds: 10 },
+      description: "<p>All damage taken is reduced by half your level (rounded down) + your Constitution modifier (minimum 1).</p>",
+      system: { changes: [{ key: "system.traits.dm.midi.all", type: "add",
+        value: "-max(1, floor(@details.level / 2) + @abilities.con.mod)", priority: 20, phase: "initial" }] }
+    }]);
+    return sayAs(actor, `<strong>Anthropomorphic Constitution</strong>: ${actor.name} hardens; damage is reduced for 1 minute.`);
+  }
+});
+
+/* -------------------------------------------- */
 /*  Setup                                       */
 /* -------------------------------------------- */
 
