@@ -369,9 +369,15 @@ Hooks.on("renderItemChoiceFlow", async (flow, element) => {
   picker.view = flow.theiaView;
   const esc = foundry.utils.escapeHTML;
   const boxes = () => [...section.querySelectorAll(".item-list.current-level dnd5e-checkbox")];
-  const draw = async () => {
-    const focused = document.activeElement?.name;
+  // Keep the picker's typing and clicks away from the advancement form, which would re-render the whole step.
+  for (const type of ["input", "change", "keydown", "submit"]) host.addEventListener(type, ev => {
+    if ((type === "keydown") && (ev.key === "Enter")) ev.preventDefault();
+    ev.stopPropagation();
+  });
+  // A full draw builds the filters too; a list draw only replaces the list and details, so the search keeps its focus.
+  const draw = async (listOnly = false) => {
     const root = await picker._renderHTML();
+    for (const el of root.querySelectorAll("[name]")) { el.dataset.field = el.getAttribute("name"); el.removeAttribute("name"); }
     const chosen = boxes().filter(b => b.checked);
     const names = await Promise.all(chosen.map(b => fromUuid(b.name).then(d => d?.name ?? b.name)));
     const head = document.createElement("div");
@@ -379,11 +385,19 @@ Hooks.on("renderItemChoiceFlow", async (flow, element) => {
     head.innerHTML = chosen.length
       ? `<strong>Chosen:</strong> ${names.map(esc).join(", ")} <a data-action="clear"><i class="fa-solid fa-xmark"></i> clear</a>`
       : `<em>Choose ${esc(flow.advancement.title ?? "an option")} below, then take it.</em>`;
-    host.replaceChildren(head, root);
-    if (focused === "search") { const input = host.querySelector("input[name=search]"); input?.focus(); input?.setSelectionRange(input.value.length, input.value.length); }
-    bind();
+    const oldColumns = host.querySelector(".columns");
+    if (listOnly && oldColumns) {
+      host.querySelector(".inline-chosen")?.replaceWith(head);
+      oldColumns.replaceWith(root.querySelector(".columns"));
+      bindList();
+    } else {
+      host.replaceChildren(head, root);
+      bindFilters();
+      bindList();
+    }
   };
-  picker.render = () => draw(); // select() re-renders through this
+  picker.render = () => draw(true); // select() re-renders through this
+  let searchTimer = null;
   const tick = (uuid, checked) => {
     const box = boxes().find(b => b.name === uuid);
     if (!box) return ui.notifications.warn("That option can't be selected in this step.");
@@ -391,11 +405,19 @@ Hooks.on("renderItemChoiceFlow", async (flow, element) => {
     box.checked = checked;
     box.dispatchEvent(new Event("change", { bubbles: true }));
   };
-  const bind = () => {
-    host.querySelector("input[name=search]")?.addEventListener("input", ev => { picker.view.search = ev.target.value; draw(); });
-    for (const name of ["category", "level", "prereq"]) host.querySelector(`select[name=${name}]`)?.addEventListener("change", ev => { picker.view[name] = ev.target.value; draw(); });
+  const bindFilters = () => {
+    host.querySelector("[data-field=search]")?.addEventListener("input", ev => {
+      picker.view.search = ev.target.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(() => draw(true), 150);
+    });
+    for (const name of ["category", "level", "prereq"]) {
+      host.querySelector(`[data-field=${name}]`)?.addEventListener("change", ev => { picker.view[name] = ev.target.value; draw(true); });
+    }
+  };
+  const bindList = () => {
     for (const li of host.querySelectorAll("li.theia-feat")) li.addEventListener("click", () => picker.select(li.dataset.uuid));
-    host.querySelector("button[data-action=choose]")?.addEventListener("click", () => { if (picker.view.selected) tick(picker.view.selected.uuid, true); });
+    host.querySelector("button[data-action=choose]")?.addEventListener("click", ev => { ev.preventDefault(); if (picker.view.selected) tick(picker.view.selected.uuid, true); });
     host.querySelector("[data-action=clear]")?.addEventListener("click", () => { for (const b of boxes().filter(x => x.checked)) tick(b.name, false); });
   };
   await draw();
@@ -417,9 +439,23 @@ Hooks.on("renderScaleValueFlow", (flow, element) => {
   const note = document.createElement("p");
   note.className = "theia-spell-note notes";
   note.innerHTML = gain > 0
-    ? `<i class="fa-solid fa-book-sparkles"></i> <strong>+${gain} ${kind}${gain > 1 ? "s" : ""}</strong> (${before} → ${now}). You choose ${gain > 1 ? "them" : "it"} in the Spell Book, which opens when this level-up finishes.`
-    : `<i class="fa-solid fa-book"></i> ${now} ${kind}s at this level. You can change them in the Spell Book.`;
+    ? `<i class="fa-solid fa-book-sparkles"></i> <strong>+${gain} ${kind}${gain > 1 ? "s" : ""}</strong> (${before} → ${now}). The Spell Book opens again when this level-up finishes, with the new limit.`
+    : `<i class="fa-solid fa-book"></i> ${now} ${kind}s at this level.`;
   element.append(note);
+  // Open Spell Book from the step itself (on the real character: the new limit counts once the level-up is complete).
+  const api = game.modules.get("spell-book")?.api;
+  if (api?.openSpellBookForActor) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "theia-spell-open";
+    button.innerHTML = `<i class="fa-solid fa-book-open"></i> Choose spells in the Spell Book`;
+    button.addEventListener("click", ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      const manager = foundry.applications.instances.get(element.closest(".application")?.id);
+      api.openSpellBookForActor(manager?.actor ?? advancement.actor);
+    });
+    element.append(button);
+  }
   if (gain > 0) {
     const manager = foundry.applications.instances.get(element.closest(".application")?.id);
     if (manager) manager.theiaSpellsGrow = true;
