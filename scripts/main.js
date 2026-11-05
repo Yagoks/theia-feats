@@ -542,6 +542,52 @@ Hooks.on("updateActor", async (actor, changes) => {
 });
 
 /* -------------------------------------------- */
+/*  Theia class spell lists (Spell Book)        */
+/* -------------------------------------------- */
+
+/**
+ * Spell Book only links the stock classes (bard, wizard...) to their lists by itself. The Theia classes have their own
+ * identifiers (wizard-theia, shaman, magus...), and their lists live in Spell Book's Custom Spell Lists pack, flagged
+ * "flags.theia.source". When a character has a Theia class with no list assigned, the active GM assigns it.
+ */
+const LIST_PACK = "spell-book.custom-spell-lists";
+let theiaLists = null;
+async function theiaListFor(identifier) {
+  if (!theiaLists) {
+    theiaLists = new Map();
+    const pack = game.packs.get(LIST_PACK);
+    for (const journal of (await pack?.getDocuments()) ?? []) for (const page of journal.pages) {
+      if ((page.type === "spells") && page.flags?.theia?.source && (page.system.type === "class")) theiaLists.set(page.system.identifier, page.uuid);
+    }
+  }
+  return theiaLists.get(identifier) ?? null;
+}
+async function linkTheiaSpellLists(actor) {
+  const api = game.modules.get("spell-book")?.api;
+  if (!api?.setClassSpellLists || (actor?.type !== "character")) return;
+  for (const cls of actor.items.filter(i => i.type === "class")) {
+    const progression = cls.system.spellcasting?.progression;
+    if (!progression || (progression === "none")) continue;
+    const id = cls.system.identifier;
+    const rules = actor.getFlag("spell-book", "classRules")?.[id];
+    if (rules?.customSpellList?.length) continue;
+    const uuid = await theiaListFor(id);
+    if (uuid) await api.setClassSpellLists(actor, id, [uuid]);
+  }
+}
+Hooks.on("createItem", item => {
+  if ((item.type === "class") && (item.parent instanceof Actor) && (game.users.activeGM === game.user)) linkTheiaSpellLists(item.parent);
+});
+Hooks.once("ready", async () => {
+  if (game.users.activeGM !== game.user) return;
+  // Spell Book registers its API late in its own ready; wait for it (up to 15 s).
+  for (let i = 0; (i < 30) && !game.modules.get("spell-book")?.api?.setClassSpellLists; i++) await new Promise(r => setTimeout(r, 500));
+  for (const actor of game.actors.filter(a => a.type === "character")) {
+    try { await linkTheiaSpellLists(actor); } catch (error) { console.warn(`${MODULE_ID} | spell list for ${actor.name}`, error); }
+  }
+});
+
+/* -------------------------------------------- */
 /*  Setup                                       */
 /* -------------------------------------------- */
 

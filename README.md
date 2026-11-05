@@ -23,3 +23,7 @@ A transfer effect with the flag `flags.theia-feats.requires` is turned on and of
 ## Elemental Adept
 
 The Theia_Elemental_Adept macro reads the damage type from the feat's name, such as "Elemental Adept (Fire)". When the feat is added to an actor under its bare name, the user adding it chooses the type (acid, cold, fire, lightning or thunder, skipping the ones already taken) and the feat is renamed.
+
+## Theia class spell lists
+
+The Theia classes have their own identifiers (`wizard-theia`, `shaman`, `magus`...), which Spell Book doesn't link to a spell list by itself. Their lists live in Spell Book's Custom Spell Lists pack (pages flagged `flags.theia.source`). When a character gains a Theia spellcasting class, or when the world opens, the active GM's client assigns that class's list through Spell Book's API, unless the class already has one.
