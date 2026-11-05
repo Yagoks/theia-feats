@@ -156,7 +156,9 @@ function unmetPrerequisites(actor, entry, level) {
   const parts = requirementParts(entry.system?.requirements);
   const covered = coveredParts(entry, parts);
   // The required items (a lineage, a feat, a feature) are named again in the text, which reads better than their ids.
-  if (items.length && !items.some(i => actor.identifiedItems?.get(i)?.size)) {
+  // When the item isn't there, the text still counts (e.g. "Spellcasting or Pact Magic Feature" met by Pact Magic).
+  const textMet = covered.length && covered.every(p => p.test(actor));
+  if (items.length && !items.some(i => actor.identifiedItems?.get(i)?.size) && !textMet) {
     unmet.push(covered.length ? covered.map(p => p.label).join(" · ") : items.map(i => dnd5e.registry.items.get(i)?.name ?? i).join(" or "));
   }
   if (!prereqs.repeatable && actor.sourcedItems?.get(entry.uuid)?.size) unmet.push("Already taken");
@@ -181,10 +183,10 @@ Hooks.on("preCreateItem", (item, data) => {
 
 /**
  * dnd5e's Ability Score Improvement step opens the compendium browser over every Item pack to choose a feat. This
- * picker lists only the feats of the configured pack (Class Features (Shared) by default) from its index, with search,
+ * picker lists only the feats of the configured pack (Feats (Shared) by default) from its index, with search,
  * category, and the actor's prerequisites; a feat's description loads when it is selected.
  */
-const DEFAULT_PACK = "forge-vtt-shared-compendiums-theia.item-3-class-features";
+const DEFAULT_PACK = "forge-vtt-shared-compendiums-theia.item-6-feats";
 const INDEX_FIELDS = ["system.type", "system.prerequisites", "system.requirements", "system.source", "flags.theia.prereqs"];
 
 class FeatPicker extends foundry.applications.api.ApplicationV2 {
@@ -220,7 +222,8 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
   /** The feats to list: an item choice's pool when given, else every feat of the pack. */
   async list() {
     const all = await FeatPicker.entries(); // also the feat names the requirements text is read against
-    if (!this.pool) return all;
+    // Fighting Style feats are chosen only through a Fighting Style feature (which passes them as its pool).
+    if (!this.pool) return all.filter(e => !/^Fighting Style:/i.test(e.name));
     if (this._list) return this._list;
     const byPack = new Map();
     for (const uuid of this.pool) {
@@ -443,46 +446,11 @@ Hooks.on("renderScaleValueFlow", (flow, element) => {
     ? `<i class="fa-solid fa-book-sparkles"></i> <strong>+${gain} ${kind}${gain > 1 ? "s" : ""}</strong> (${before} → ${now}). The Spell Book opens again when this level-up finishes, with the new limit.`
     : `<i class="fa-solid fa-book"></i> ${now} ${kind}s at this level.`;
   element.append(note);
-  // Open Spell Book from the step itself (on the real character: the new limit counts once the level-up is complete).
-  const api = game.modules.get("spell-book")?.api;
-  if (api?.openSpellBookForActor) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "theia-spell-open";
-    button.innerHTML = `<i class="fa-solid fa-book-open"></i> Finish the level-up and choose spells in the Spell Book`;
-    button.title = "The new class only reaches the character when the level-up finishes, so its spell list shows after that. This goes through the remaining steps and stops at any step that still needs a choice.";
-    button.addEventListener("click", ev => {
-      ev.preventDefault(); ev.stopPropagation();
-      const manager = foundry.applications.instances.get(element.closest(".application")?.id);
-      if (!manager) return api.openSpellBookForActor(advancement.actor);
-      manager.theiaSpellsGrow = true;
-      finishAdvancement(manager);
-    });
-    element.append(button);
-  }
   if (gain > 0) {
     const manager = foundry.applications.instances.get(element.closest(".application")?.id);
     if (manager) manager.theiaSpellsGrow = true;
   }
 });
-/** Goes through the remaining level-up steps (like pressing Next), stopping where a step still needs a choice. */
-async function finishAdvancement(manager) {
-  const wait = ms => new Promise(r => setTimeout(r, ms));
-  for (let i = 0; i < 60; i++) {
-    await wait(700); // let the window finish drawing the step before pressing its button
-    const el = manager.element;
-    if (!el?.isConnected) return; // done: the complete hook opens the Spell Book
-    const button = el.querySelector("[data-action=complete]") ?? el.querySelector("[data-action=next]");
-    if (!button || button.disabled) return;
-    const step = manager.step;
-    button.click();
-    // dnd5e keeps the button disabled while it processes the step; it re-renders (new button) when the step moves on.
-    await new Promise(r => setTimeout(r, 200));
-    for (let t = 0; t < 200 && manager.element?.isConnected && (manager.step === step) && button.isConnected && button.disabled; t++) await new Promise(r => setTimeout(r, 150));
-    for (let t = 0; t < 20 && manager.element?.isConnected && (manager.step === step); t++) await new Promise(r => setTimeout(r, 150));
-    if (manager.element?.isConnected && (manager.step === step)) return; // this step needs something from the player
-  }
-}
 Hooks.on("dnd5e.advancementManagerComplete", manager => {
   const actor = manager.actor;
   const api = game.modules.get("spell-book")?.api;
@@ -617,6 +585,8 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
 
   async confirm() {
     const { chosen, ability } = this.view;
+    // Wizard spell book choices (school savants): the spells are written in the character's Spell Book spellbook.
+    if (this.choice.target === "spellbook" && await this.writeInSpellbook([...chosen])) return this.finish();
     const cfg = this.choice.spell ?? {};
     const data = [];
     for (const uuid of chosen) {
@@ -641,6 +611,27 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
       data.push(spell);
     }
     await this.actor.createEmbeddedDocuments("Item", data);
+    return this.finish();
+  }
+
+  /** Adds spells to the actor's wizard spellbook page of Spell Book; false when there's none. */
+  async writeInSpellbook(uuids) {
+    const pack = game.packs.get("spell-book.custom-spell-lists");
+    if (!pack) return false;
+    const classId = Object.keys(this.actor.classes ?? {}).find(c => /wizard/.test(c)) ?? "";
+    for (const journal of await pack.getDocuments()) {
+      const page = journal.pages.find(p => p.flags?.["spell-book"]?.isActorSpellbook && (p.flags["spell-book"].actorId === this.actor.id) && (!classId || p.flags["spell-book"].classIdentifier === classId));
+      if (!page) continue;
+      const spells = new Set(page.system.spells ?? []);
+      for (const u of uuids) spells.add(u);
+      await page.update({ "system.spells": [...spells] });
+      ui.notifications.info(`${this.actor.name}: ${uuids.length} spell(s) written in the spellbook. Prepare them in the Spell Book.`);
+      return true;
+    }
+    return false;
+  }
+
+  async finish() {
     const done = [...(this.item.flags?.theia?.spellChoicesDone ?? []), this.choice.key];
     await this.item.update({ "flags.theia.spellChoicesDone": done });
     this.resolve?.(true); this.resolve = null;
@@ -660,7 +651,10 @@ function pendingSpellChoices(actor) {
     if (!Array.isArray(choices) || !choices.length) continue;
     const done = new Set(item.flags?.theia?.spellChoicesDone ?? []);
     // Class choices open at a class level; the others when the item is gained.
-    const cls = item.type === "class" ? item : (item.type === "subclass" ? actor.classes?.[item.system.classIdentifier] : null);
+    let owner = item;
+    const origin = item.flags?.dnd5e?.advancementOrigin?.split(".")[0];
+    if (!["class", "subclass"].includes(item.type) && origin) owner = actor.items.get(origin) ?? item;
+    const cls = owner.type === "class" ? owner : (owner.type === "subclass" ? actor.classes?.[owner.system.classIdentifier] : null);
     // Species choices open at a character level; feats when they're gained.
     const level = cls ? cls.system.levels : (item.type === "race" ? (actor.system.details?.level ?? 0) : Infinity);
     for (const choice of choices) if (!done.has(choice.key) && ((choice.level ?? 0) <= level)) out.push({ item, choice });
