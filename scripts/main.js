@@ -488,7 +488,16 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
 
   async entries() {
     if (this._entries) return this._entries;
-    const pool = this.choice.pool ?? [];
+    let pool = this.choice.pool ?? [];
+    // "spellbook": the spells written in the character's Spell Book spellbook (optionally only those not prepared).
+    if (this.choice.poolFrom === "spellbook") {
+      pool = [...await spellbookSpells(this.actor)];
+      if (this.choice.excludePrepared) {
+        const prepared = new Set(this.actor.items.filter(i => i.type === "spell" && i.system.prepared).map(i => i._stats?.compendiumSource));
+        pool = pool.filter(u => !prepared.has(u));
+      }
+      if (!pool.length) pool = ["none"];
+    }
     const byPack = new Set();
     for (const uuid of pool) { const { collection } = foundry.utils.parseUuid(uuid); if (collection?.getIndex) byPack.add(collection); }
     // The restriction (spell level, school) applies to the pool; with no pool, to every spell of the shared spell compendium.
@@ -588,6 +597,11 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
     // Wizard spell book choices (school savants): the spells are written in the character's Spell Book spellbook.
     if (this.choice.target === "spellbook" && await this.writeInSpellbook([...chosen])) return this.finish();
     const cfg = this.choice.spell ?? {};
+    // A choice that replaces what it gave before (Memorize Spell).
+    if (this.choice.replace) {
+      const old = this.actor.items.filter(i => i.flags?.theia?.fromChoice === `${this.item.id}.${this.choice.key}`).map(i => i.id);
+      if (old.length) await this.actor.deleteEmbeddedDocuments("Item", old);
+    }
     const data = [];
     for (const uuid of chosen) {
       const spell = (await fromUuid(uuid))?.toObject();
@@ -596,6 +610,7 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
       const sys = spell.system;
       if (ability) sys.ability = ability;
       if (cfg.method) { sys.method = cfg.method; sys.prepared = cfg.prepared ?? 0; }
+      if (cfg.suffix) spell.name = `${spell.name} (${cfg.suffix})`;
       sys.sourceItem = `${this.item.type}:${this.item.system.identifier || this.item.name.slugify()}`;
       if (cfg.uses?.max && cfg.uses?.per) {
         sys.uses = { spent: 0, max: String(cfg.uses.max), recovery: [{ period: cfg.uses.per, type: "recoverAll" }] };
@@ -632,8 +647,10 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
   }
 
   async finish() {
-    const done = [...(this.item.flags?.theia?.spellChoicesDone ?? []), this.choice.key];
-    await this.item.update({ "flags.theia.spellChoicesDone": done });
+    if (!this.choice.repeatable) {
+      const done = [...(this.item.flags?.theia?.spellChoicesDone ?? []), this.choice.key];
+      await this.item.update({ "flags.theia.spellChoicesDone": done });
+    }
     this.resolve?.(true); this.resolve = null;
     this.close();
   }
@@ -642,6 +659,23 @@ class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
 
   static open(options) { return new Promise(resolve => new SpellChoicePicker({ ...options, resolve }).render({ force: true })); }
 }
+
+/** The spells in an actor's Spell Book spellbook pages (wizard), as uuids. */
+async function spellbookSpells(actor) {
+  const out = new Set();
+  const pack = game.packs.get("spell-book.custom-spell-lists");
+  for (const journal of (await pack?.getDocuments()) ?? []) for (const page of journal.pages) {
+    if (page.flags?.["spell-book"]?.isActorSpellbook && (page.flags["spell-book"].actorId === actor.id)) for (const u of page.system.spells ?? []) out.add(u);
+  }
+  return out;
+}
+
+// A feature whose activity opens a repeatable spell choice (Memorize Spell): flags.theia.useChoice on the item.
+Hooks.on("dnd5e.postUseActivity", activity => {
+  const item = activity?.item, choice = item?.flags?.theia?.useChoice;
+  if (!choice || !(item.parent instanceof Actor) || !item.parent.isOwner) return;
+  SpellChoicePicker.open({ actor: item.parent, item, choice: { repeatable: true, ...choice } });
+});
 
 /** The spell choices of an actor's items that are open now and not yet made. */
 function pendingSpellChoices(actor) {
@@ -657,7 +691,7 @@ function pendingSpellChoices(actor) {
     const cls = owner.type === "class" ? owner : (owner.type === "subclass" ? actor.classes?.[owner.system.classIdentifier] : null);
     // Species choices open at a character level; feats when they're gained.
     const level = cls ? cls.system.levels : (item.type === "race" ? (actor.system.details?.level ?? 0) : Infinity);
-    for (const choice of choices) if (!done.has(choice.key) && ((choice.level ?? 0) <= level)) out.push({ item, choice });
+    for (const choice of choices) if (!choice.repeatable && !done.has(choice.key) && ((choice.level ?? 0) <= level)) out.push({ item, choice });
   }
   return out;
 }
@@ -859,6 +893,68 @@ Hooks.on("updateActor", async (actor, changes) => {
 });
 
 /* -------------------------------------------- */
+/*  Theia class rules                           */
+/* -------------------------------------------- */
+
+/**
+ * Rules a Theia class keeps in its own flags, so each class can be tuned from its item:
+ * - flags.theia.hpAverage: hit points per level when the average is taken (Wizard: 5 instead of 4 for a d6);
+ * - flags.theia.slotTable: { classLevel: { spellLevel: slots } } changes to the full-caster slots of a single-class
+ *   character at those levels (Wizard: 19 = one 6th; 20 = two 6th and one 7th);
+ * - flags.theia.spellBookRules: Spell Book class rules set when the class reaches a character (swapping, rituals,
+ *   wizard spellbook).
+ */
+const HP_AVERAGE = new WeakMap();
+const hpAverageOf = advancement => Number(advancement?.item?.flags?.theia?.hpAverage) || null;
+Hooks.once("setup", () => {
+  const HPA = CONFIG.DND5E.advancementTypes?.HitPoints?.documentClass;
+  if (!HPA) return;
+  const average = Object.getOwnPropertyDescriptor(HPA.prototype, "average")?.get;
+  Object.defineProperty(HPA.prototype, "average", { configurable: true, get() { return hpAverageOf(this) ?? average.call(this); } });
+  const staticValue = HPA.valueForLevel;
+  HPA.valueForLevel = function (data, hitDieValue, level) {
+    if ((data?.[level] === "avg") && HP_AVERAGE.has(data)) return HP_AVERAGE.get(data);
+    return staticValue.call(this, data, hitDieValue, level);
+  };
+  const valueForLevel = HPA.prototype.valueForLevel;
+  HPA.prototype.valueForLevel = function (level) {
+    const avg = hpAverageOf(this);
+    if (avg) HP_AVERAGE.set(this.value, avg);
+    return valueForLevel.call(this, level);
+  };
+  const apply = HPA.prototype.apply;
+  HPA.prototype.apply = function (level, data, options) {
+    const avg = hpAverageOf(this);
+    if (avg && data) HP_AVERAGE.set(data, avg);
+    return apply.call(this, level, data, options);
+  };
+});
+
+Hooks.on("dnd5e.prepareSpellSlots", (spells, actor, progression) => {
+  const casters = Object.values(actor?.classes ?? {}).filter(c => (c.system.spellcasting?.progression ?? "none") !== "none");
+  if (casters.length !== 1) return;
+  const changes = casters[0].flags?.theia?.slotTable?.[casters[0].system.levels];
+  if (!changes) return;
+  CONFIG.DND5E.spellcasting.spell.prepareSlots(spells, actor, progression);
+  for (const [level, slots] of Object.entries(changes)) {
+    const slot = spells[`spell${level}`];
+    if (slot && !Number.isNumeric(slot.override)) slot.max = Number(slots);
+  }
+  return false;
+});
+
+async function applySpellBookRules(actor) {
+  for (const cls of actor.items.filter(i => i.type === "class")) {
+    const rules = cls.flags?.theia?.spellBookRules;
+    const id = cls.system.identifier;
+    if (!rules || actor.flags?.theia?.spellBookRules?.[id]) continue;
+    const update = { [`flags.theia.spellBookRules.${id}`]: true };
+    for (const [k, v] of Object.entries(rules)) update[`flags.spell-book.classRules.${id}.${k}`] = v;
+    await actor.update(update);
+  }
+}
+
+/* -------------------------------------------- */
 /*  Theia class spell lists (Spell Book)        */
 /* -------------------------------------------- */
 
@@ -891,6 +987,7 @@ async function linkTheiaSpellLists(actor) {
     const uuid = await theiaListFor(id);
     if (uuid) await api.setClassSpellLists(actor, id, [uuid]);
   }
+  await applySpellBookRules(actor);
 }
 Hooks.on("createItem", item => {
   if ((item.type === "class") && (item.parent instanceof Actor) && (game.users.activeGM === game.user)) linkTheiaSpellLists(item.parent);
