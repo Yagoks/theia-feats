@@ -430,6 +430,78 @@ Hooks.on("createItem", async (item, options, userId) => {
 });
 
 /* -------------------------------------------- */
+/*  Reactions around saving throws              */
+/* -------------------------------------------- */
+
+const ownerOf = actor => globalThis.cat?.utils?.queryUtils?.firstOwner?.(actor, true) ?? game.user.id;
+const askOwner = (actor, title, content) => globalThis.cat?.utils?.dialogUtils?.confirm?.(title, content, { userId: ownerOf(actor) })
+  ?? foundry.applications.api.DialogV2.confirm({ window: { title }, content });
+const featNamed = (actor, name) => actor?.items.find(i => (i.type === "feat") && (i.name === name));
+const sayAs = (actor, text) => ChatMessage.create({ speaker: ChatMessage.getSpeaker({ actor }), content: `<p>${text}</p>` });
+
+/**
+ * After Midi checks the saving throws, on the client running the workflow:
+ *  - Interpose Shield: a target that succeeds on a Dexterity save against half damage, wielding a shield, may use its
+ *    reaction to take no damage (Midi's semi-super saver).
+ *  - Forceful Soul: the caster may use its reaction to give a target that succeeded a −1d6 penalty, possibly failing it
+ *    (once per short rest; spells, class features, racial traits and feats).
+ */
+Hooks.on("midi-qol.postCheckSaves", async wf => {
+  const activity = wf.saveActivity ?? wf.activity;
+  if (!activity?.save || !wf.saves?.size) return;
+  const dc = activity.save.dc?.value ?? wf.saveDC;
+  const rollFor = t => (wf.saveRolls ?? []).find(r => r.options?.["midi-qol"]?.targetUuid === (t.document ?? t).uuid);
+  const halfOnSave = activity.damage?.onSave === "half";
+
+  for (const target of [...wf.saves]) {
+    const tActor = target.actor;
+    const shield = tActor?.items.some(i => (i.type === "equipment") && (i.system.type?.value === "shield") && i.system.equipped);
+    if (!halfOnSave || !activity.save.ability?.has?.("dex") || !shield) continue;
+    if (!featNamed(tActor, "Interpose Shield") || MidiQOL.hasUsedReaction(tActor) || wf.semiSuperSavers?.has(target)) continue;
+    if (!await askOwner(tActor, "Interpose Shield", `<p>${target.name} succeeded on the Dexterity save against ${wf.item?.name}. Use your reaction to take no damage?</p>`)) continue;
+    await MidiQOL.setReactionUsed(tActor);
+    wf.semiSuperSavers = wf.semiSuperSavers.add(target);
+    await sayAs(tActor, `<strong>Interpose Shield</strong>: ${target.name} takes no damage from ${wf.item?.name}.`);
+  }
+
+  const caster = wf.actor;
+  const soul = featNamed(caster, "Forceful Soul");
+  const sourceOk = ["spell", "feat"].includes(wf.item?.type);
+  if (!soul || !sourceOk || MidiQOL.hasUsedReaction(caster) || !((soul.system.uses?.value ?? 0) > 0)) return;
+  for (const target of [...wf.saves]) {
+    const roll = rollFor(target);
+    if (!roll || !Number.isFinite(dc) || (roll.total - 6 >= dc)) continue; // even a 6 wouldn't make it fail
+    if (!await askOwner(caster, "Forceful Soul", `<p>${target.name} succeeded (${roll.total} vs DC ${dc}). Use your reaction to impose −1d6?</p>`)) continue;
+    await MidiQOL.setReactionUsed(caster);
+    await soul.update({ "system.uses.spent": (soul.system.uses.spent ?? 0) + 1 });
+    const penalty = await new Roll("1d6").evaluate();
+    await penalty.toMessage({ speaker: ChatMessage.getSpeaker({ actor: caster }), flavor: "Forceful Soul penalty" });
+    const fails = roll.total - penalty.total < dc;
+    if (fails) {
+      wf.saves.delete(target); wf.saves = wf.saves;
+      wf.failedSaves = wf.failedSaves.add(target);
+      wf.semiSuperSavers?.delete(target); wf.superSavers?.delete(target);
+    }
+    await sayAs(caster, `<strong>Forceful Soul</strong>: ${target.name}'s save is ${roll.total - penalty.total} vs DC ${dc}, ${fails ? "a failure" : "still a success"}.`);
+    break;
+  }
+});
+
+/**
+ * Bulwark: when a creature with the feat is knocked Prone, its player may use the reaction to stay standing.
+ * Run by the active GM; being moved against your will is left to the table.
+ */
+Hooks.on("createActiveEffect", async effect => {
+  const actor = effect.parent;
+  if (!(actor instanceof Actor) || (game.users.activeGM !== game.user) || !effect.statuses?.has("prone")) return;
+  if (!featNamed(actor, "Bulwark") || globalThis.MidiQOL?.hasUsedReaction(actor)) return;
+  if (!await askOwner(actor, "Bulwark", `<p>${actor.name} is knocked Prone. Use your reaction to steady yourself and stay standing?</p>`)) return;
+  await MidiQOL.setReactionUsed(actor);
+  await effect.delete();
+  await sayAs(actor, `<strong>Bulwark</strong>: ${actor.name} steadies and stays standing.`);
+});
+
+/* -------------------------------------------- */
 /*  Setup                                       */
 /* -------------------------------------------- */
 
