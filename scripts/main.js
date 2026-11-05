@@ -308,7 +308,8 @@ class FeatPicker extends foundry.applications.api.ApplicationV2 {
     for (const name of ["category", "level", "prereq"]) {
       el.querySelector(`select[name=${name}]`).addEventListener("change", ev => { this.view[name] = ev.target.value; this.render(); });
     }
-    for (const li of el.querySelectorAll("li.theia-feat")) li.addEventListener("click", () => this.select(li.dataset.uuid));
+    // One click shows the spell and chooses it (or takes it back); the detail button does the same.
+    for (const li of el.querySelectorAll("li.theia-feat")) li.addEventListener("click", async () => { await this.select(li.dataset.uuid, false); this.toggle(); });
     el.querySelector("button[data-action=choose]")?.addEventListener("click", () => this.choose());
   }
 
@@ -448,11 +449,14 @@ Hooks.on("renderScaleValueFlow", (flow, element) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "theia-spell-open";
-    button.innerHTML = `<i class="fa-solid fa-book-open"></i> Choose spells in the Spell Book`;
+    button.innerHTML = `<i class="fa-solid fa-book-open"></i> Finish the level-up and choose spells in the Spell Book`;
+    button.title = "The new class only reaches the character when the level-up finishes, so its spell list shows after that. This goes through the remaining steps and stops at any step that still needs a choice.";
     button.addEventListener("click", ev => {
       ev.preventDefault(); ev.stopPropagation();
       const manager = foundry.applications.instances.get(element.closest(".application")?.id);
-      api.openSpellBookForActor(manager?.actor ?? advancement.actor);
+      if (!manager) return api.openSpellBookForActor(advancement.actor);
+      manager.theiaSpellsGrow = true;
+      finishAdvancement(manager);
     });
     element.append(button);
   }
@@ -461,12 +465,231 @@ Hooks.on("renderScaleValueFlow", (flow, element) => {
     if (manager) manager.theiaSpellsGrow = true;
   }
 });
+/** Goes through the remaining level-up steps (like pressing Next), stopping where a step still needs a choice. */
+async function finishAdvancement(manager) {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  for (let i = 0; i < 60; i++) {
+    await wait(700); // let the window finish drawing the step before pressing its button
+    const el = manager.element;
+    if (!el?.isConnected) return; // done: the complete hook opens the Spell Book
+    const button = el.querySelector("[data-action=complete]") ?? el.querySelector("[data-action=next]");
+    if (!button || button.disabled) return;
+    const step = manager.step;
+    button.click();
+    // dnd5e keeps the button disabled while it processes the step; it re-renders (new button) when the step moves on.
+    await new Promise(r => setTimeout(r, 200));
+    for (let t = 0; t < 200 && manager.element?.isConnected && (manager.step === step) && button.isConnected && button.disabled; t++) await new Promise(r => setTimeout(r, 150));
+    for (let t = 0; t < 20 && manager.element?.isConnected && (manager.step === step); t++) await new Promise(r => setTimeout(r, 150));
+    if (manager.element?.isConnected && (manager.step === step)) return; // this step needs something from the player
+  }
+}
 Hooks.on("dnd5e.advancementManagerComplete", manager => {
   const actor = manager.actor;
   const api = game.modules.get("spell-book")?.api;
   if (!actor || !api?.openSpellBookForActor || !manager.theiaSpellsGrow) return;
   ui.notifications.info(`${actor.name}: choose the new spells in the Spell Book.`);
   setTimeout(() => api.openSpellBookForActor(actor), 500);
+});
+
+/* -------------------------------------------- */
+/*  Spell choices outside the level-up window   */
+/* -------------------------------------------- */
+
+/**
+ * The Theia items don't choose spells in the level-up window (it was slow and duplicated Spell Book). A feat, species,
+ * class or feature that lets the character pick spells keeps that choice in "flags.theia.spellChoices", an array of
+ * { key, title, count, level, pool: [uuids], spell: { ability: [], method, prepared, uses: { max, per } } }.
+ * "level" is the class level the choice opens at (0: when the item is gained). After a level-up, or when such an item is
+ * added, the Spell Choice window lists the pool (search, level, school) and creates the chosen spells. What was chosen
+ * is remembered in "flags.theia.spellChoicesDone" on the item.
+ */
+class SpellChoicePicker extends foundry.applications.api.ApplicationV2 {
+  constructor({ actor, item, choice, resolve, ...options } = {}) {
+    super(options);
+    Object.assign(this, { actor, item, choice, resolve });
+    this.view = { search: "", level: "", school: "", chosen: new Set(), selected: null, ability: choice.spell?.ability?.[0] ?? "" };
+  }
+
+  static DEFAULT_OPTIONS = {
+    classes: ["theia-feat-picker", "theia-spell-choice"],
+    window: { title: "Choose Spells", icon: "fa-solid fa-book-sparkles", resizable: true },
+    position: { width: 760, height: 620 }
+  };
+
+  get title() { return `${this.item.name}: ${this.choice.title}`; }
+
+  async entries() {
+    if (this._entries) return this._entries;
+    const pool = this.choice.pool ?? [];
+    const byPack = new Set();
+    for (const uuid of pool) { const { collection } = foundry.utils.parseUuid(uuid); if (collection?.getIndex) byPack.add(collection); }
+    // The restriction (spell level, school) applies to the pool; with no pool, to every spell of the shared spell compendium.
+    const L = String(this.choice.restriction?.level ?? "");
+    const schools = this.choice.restriction?.school ?? [];
+    const maxSlot = Math.max(0, ...Object.values(this.actor.system.spells ?? {}).filter(s => s.max > 0).map(s => s.level ?? 0));
+    const allowed = e => ((L === "") || (L === "available" ? (e.system.level >= 1 && e.system.level <= maxSlot) : e.system.level === Number(L)))
+      && (!schools.length || schools.includes(e.system.school));
+    let fits = e => pool.includes(e.uuid) && allowed(e);
+    if (!pool.length) {
+      const spells = game.packs.get("forge-vtt-shared-compendiums-theia.item-1-spells") ?? game.packs.find(p => p.metadata.label === "Spells (Shared)");
+      if (spells) byPack.add(spells);
+      fits = e => (e.type === "spell") && allowed(e);
+    }
+    const out = [];
+    const owned = new Set(this.actor.items.filter(i => i.type === "spell").map(i => i._stats?.compendiumSource));
+    for (const pack of byPack) {
+      const index = await pack.getIndex({ fields: ["type", "system.level", "system.school"] });
+      for (const e of index.values()) if (fits(e)) out.push({ ...e, owned: owned.has(e.uuid) });
+    }
+    return (this._entries = out.sort((a, b) => (a.system.level - b.system.level) || a.name.localeCompare(b.name, game.i18n.lang)));
+  }
+
+  async _renderHTML() {
+    const { search, level, school, chosen, selected, ability } = this.view;
+    const esc = foundry.utils.escapeHTML;
+    const all = await this.entries();
+    const term = search.trim().toLowerCase();
+    const rows = all.filter(e => (!term || e.name.toLowerCase().includes(term)) && (level === "" || e.system.level === Number(level)) && (!school || e.system.school === school));
+    const levels = [...new Set(all.map(e => e.system.level))].sort((a, b) => a - b);
+    const schools = [...new Set(all.map(e => e.system.school).filter(Boolean))];
+    const label = l => (l === 0 ? "Cantrip" : `Level ${l}`);
+    const abilities = this.choice.spell?.ability ?? [];
+    const root = document.createElement("div");
+    root.className = "theia-feat-body";
+    root.innerHTML = `
+      <div class="filters">
+        <input type="search" data-field="search" placeholder="Search spells" value="${esc(search)}">
+        <select data-field="level"><option value="">Any level</option>${levels.map(l => `<option value="${l}" ${String(l) === level ? "selected" : ""}>${label(l)}</option>`).join("")}</select>
+        <select data-field="school"><option value="">Any school</option>${schools.map(s => `<option value="${s}" ${s === school ? "selected" : ""}>${esc(CONFIG.DND5E.spellSchools[s]?.label ?? s)}</option>`).join("")}</select>
+        ${abilities.length > 1 ? `<select data-field="ability" title="Spellcasting ability">${abilities.map(a => `<option value="${a}" ${a === ability ? "selected" : ""}>${esc(CONFIG.DND5E.abilities[a]?.label ?? a)}</option>`).join("")}</select>` : ""}
+      </div>
+      <div class="inline-chosen"><strong>Chosen ${chosen.size} of ${this.choice.count}:</strong> ${[...chosen].map(u => esc(all.find(e => e.uuid === u)?.name ?? u)).join(", ") || "—"}</div>
+      <div class="columns">
+        <ul class="list">${rows.map(e => `
+          <li class="theia-feat ${e.owned ? "unmet" : ""} ${chosen.has(e.uuid) ? "active" : ""} ${e.uuid === selected?.uuid ? "selected" : ""}" data-uuid="${e.uuid}">
+            <img src="${e.img}" alt=""><span class="name">${esc(e.name)}</span>
+            <span class="tag">${label(e.system.level)} · ${esc(CONFIG.DND5E.spellSchools[e.system.school]?.label ?? "")}</span>
+            ${e.owned ? `<span class="unmet-reason">Already known</span>` : ""}
+          </li>`).join("") || `<li class="empty">No spells match.</li>`}</ul>
+        <section class="detail">${selected ? `<h3>${esc(selected.name)}</h3><div class="desc">${selected.description}</div>
+          <button type="button" data-action="toggle">${chosen.has(selected.uuid) ? '<i class="fa-solid fa-xmark"></i> Remove' : '<i class="fa-solid fa-plus"></i> Choose'} ${esc(selected.name)}</button>` : `<p class="hint">Select a spell to read it.</p>`}</section>
+      </div>
+      <button type="button" class="choose" data-action="confirm" ${chosen.size === this.choice.count ? "" : "disabled"}><i class="fa-solid fa-check"></i> Learn ${chosen.size} spell${chosen.size === 1 ? "" : "s"}</button>`;
+    return root;
+  }
+
+  _replaceHTML(result, content) {
+    const focused = document.activeElement?.dataset?.field;
+    content.replaceChildren(result);
+    if (focused === "search") { const i = content.querySelector("[data-field=search]"); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+  }
+
+  _onRender() {
+    const el = this.element;
+    let timer = null;
+    el.querySelector("[data-field=search]").addEventListener("input", ev => { this.view.search = ev.target.value; clearTimeout(timer); timer = setTimeout(() => this.render(), 150); });
+    for (const f of ["level", "school", "ability"]) el.querySelector(`[data-field=${f}]`)?.addEventListener("change", ev => { this.view[f] = ev.target.value; this.render(); });
+    // One click shows the spell and chooses it (or takes it back); the detail button does the same.
+    for (const li of el.querySelectorAll("li.theia-feat")) li.addEventListener("click", async () => { await this.select(li.dataset.uuid, false); this.toggle(); });
+    el.querySelector("[data-action=toggle]")?.addEventListener("click", () => this.toggle());
+    el.querySelector("[data-action=confirm]")?.addEventListener("click", () => this.confirm());
+  }
+
+  async select(uuid, render) {
+    if (this.view.selected?.uuid === uuid) return;
+    const item = await fromUuid(uuid);
+    if (!item) return;
+    const description = await foundry.applications.ux.TextEditor.implementation.enrichHTML(item.system.description?.value ?? "", { relativeTo: item });
+    this.view.selected = { uuid, name: item.name, description };
+    if (render !== false) this.render();
+  }
+
+  toggle() {
+    const uuid = this.view.selected?.uuid;
+    if (!uuid) return;
+    const { chosen } = this.view;
+    if (chosen.has(uuid)) chosen.delete(uuid);
+    else if (this._entries?.find(e => e.uuid === uuid)?.owned) return ui.notifications.warn(`${this.view.selected.name} is already known.`);
+    else if (chosen.size < this.choice.count) chosen.add(uuid);
+    else return ui.notifications.warn(`Only ${this.choice.count} can be chosen here: remove one first.`);
+    this.render();
+  }
+
+  async confirm() {
+    const { chosen, ability } = this.view;
+    const cfg = this.choice.spell ?? {};
+    const data = [];
+    for (const uuid of chosen) {
+      const spell = (await fromUuid(uuid))?.toObject();
+      if (!spell) continue;
+      delete spell._id;
+      const sys = spell.system;
+      if (ability) sys.ability = ability;
+      if (cfg.method) { sys.method = cfg.method; sys.prepared = cfg.prepared ?? 0; }
+      sys.sourceItem = `${this.item.type}:${this.item.system.identifier || this.item.name.slugify()}`;
+      if (cfg.uses?.max && cfg.uses?.per) {
+        sys.uses = { spent: 0, max: String(cfg.uses.max), recovery: [{ period: cfg.uses.per, type: "recoverAll" }] };
+        for (const a of Object.values(sys.activities ?? {})) {
+          if (!a.consumption?.spellSlot) continue;
+          const id = foundry.utils.randomID();
+          sys.activities[id] = { _id: id, type: "forward", name: `${a.name || "Cast"} (free casting)`, sort: (a.sort ?? 0) + 1, activity: { id: a._id },
+            consumption: { targets: [{ type: "itemUses", target: "", value: "1" }] } };
+        }
+      }
+      spell._stats = { compendiumSource: uuid };
+      spell.flags = { ...spell.flags, core: { ...(spell.flags?.core ?? {}), sourceId: uuid }, theia: { ...(spell.flags?.theia ?? {}), fromChoice: `${this.item.id}.${this.choice.key}` } };
+      data.push(spell);
+    }
+    await this.actor.createEmbeddedDocuments("Item", data);
+    const done = [...(this.item.flags?.theia?.spellChoicesDone ?? []), this.choice.key];
+    await this.item.update({ "flags.theia.spellChoicesDone": done });
+    this.resolve?.(true); this.resolve = null;
+    this.close();
+  }
+
+  async close(options) { this.resolve?.(false); this.resolve = null; return super.close(options); }
+
+  static open(options) { return new Promise(resolve => new SpellChoicePicker({ ...options, resolve }).render({ force: true })); }
+}
+
+/** The spell choices of an actor's items that are open now and not yet made. */
+function pendingSpellChoices(actor) {
+  const out = [];
+  for (const item of actor.items) {
+    const choices = item.flags?.theia?.spellChoices;
+    if (!Array.isArray(choices) || !choices.length) continue;
+    const done = new Set(item.flags?.theia?.spellChoicesDone ?? []);
+    // Class choices open at a class level; the others when the item is gained.
+    const cls = item.type === "class" ? item : (item.type === "subclass" ? actor.classes?.[item.system.classIdentifier] : null);
+    // Species choices open at a character level; feats when they're gained.
+    const level = cls ? cls.system.levels : (item.type === "race" ? (actor.system.details?.level ?? 0) : Infinity);
+    for (const choice of choices) if (!done.has(choice.key) && ((choice.level ?? 0) <= level)) out.push({ item, choice });
+  }
+  return out;
+}
+const spellChoiceQueue = new Set();
+async function offerSpellChoices(actor) {
+  if (!actor?.isOwner || spellChoiceQueue.has(actor.id)) return;
+  spellChoiceQueue.add(actor.id);
+  try {
+    for (const { item, choice } of pendingSpellChoices(actor)) {
+      const made = await SpellChoicePicker.open({ actor, item, choice });
+      if (!made) break; // closed: ask again on the next level-up or from the item
+    }
+  } finally { spellChoiceQueue.delete(actor.id); }
+}
+// A closed window can be opened again from the character sheet's menu while a choice is pending.
+Hooks.on("getHeaderControlsActorSheetV2", (sheet, controls) => {
+  const actor = sheet.document;
+  if (!(actor?.isOwner) || !pendingSpellChoices(actor).length) return;
+  controls.unshift({ icon: "fa-solid fa-book-sparkles", label: "Choose Pending Spells", action: "theiaSpellChoices", onClick: () => offerSpellChoices(actor) });
+});
+// After a level-up (classes and the items it added), and when an item with spell choices is added outside one.
+Hooks.on("dnd5e.advancementManagerComplete", manager => setTimeout(() => offerSpellChoices(manager.actor), 300));
+Hooks.on("createItem", (item, options, userId) => {
+  if ((userId !== game.user.id) || !(item.parent instanceof Actor) || !item.flags?.theia?.spellChoices?.length) return;
+  if (foundry.applications.instances.values().some?.(a => a instanceof dnd5e.applications.advancement.AdvancementManager)) return; // the level-up hook does it
+  setTimeout(() => offerSpellChoices(item.parent), 300);
 });
 
 /* -------------------------------------------- */
@@ -697,7 +920,7 @@ Hooks.once("init", () => {
     hint: "The Item compendium whose feats the feat picker lists.",
     scope: "world", config: true, type: String, default: DEFAULT_PACK
   });
-  game.modules.get(MODULE_ID).api = { FeatPicker, unmetPrerequisites };
+  game.modules.get(MODULE_ID).api = { FeatPicker, unmetPrerequisites, SpellChoicePicker, offerSpellChoices, pendingSpellChoices };
 });
 
 Hooks.once("setup", () => {

@@ -50,3 +50,10 @@
 /* Spell note in the level-up window */
 .theia-spell-note { margin: 8px 0 0; }
 .theia-spell-open { width: 100%; margin: 6px 0 0; }
+
+/* Spell choice window (feats and species that let the character pick spells) */
+.theia-spell-choice .window-content { display: flex; flex-direction: column; overflow: hidden; }
+.theia-spell-choice .theia-feat-body { flex: 1; min-height: 0; }
+.theia-spell-choice .inline-chosen { padding: 6px 10px; }
+.theia-spell-choice .choose[data-action=confirm] { flex: none; margin: 6px 10px 10px; }
+.theia-spell-choice .theia-feat.selected { outline: 1px solid rgba(217, 165, 72, 0.6); }
