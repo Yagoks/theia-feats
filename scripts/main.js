@@ -894,6 +894,33 @@ Hooks.on("midi-qol.postCheckSaves", async wf => {
 });
 
 /**
+ * Maddening Flames (Theia Chaos Domain Cleric, 11th level): after the cleric's spell deals Fire damage, their player may
+ * imbue the flames: each creature that took Fire damage makes a Wisdom save (the feature's "Frightened" or "Charmed"
+ * activity, chosen here) or is driven to madness for 1 minute, taking 1d10 Psychic damage at the start of each turn.
+ */
+Hooks.on("midi-qol.postActiveEffects", async wf => {
+  const actor = wf.actor, item = wf.item;
+  if (!actor?.isOwner || (item?.type !== "spell")) return;
+  const feature = actor.items.find(i => i.system.identifier === "maddening-flames");
+  if (!feature) return;
+  const fire = (wf.damageRolls ?? []).some(r => (r.options?.type ?? r.options?.types?.[0]) === "fire") || (wf.damageDetail ?? []).some(d => d.type === "fire" && d.value > 0);
+  if (!fire) return;
+  const burned = new Set();
+  for (const d of wf.damageList ?? []) if (((d.totalDamage ?? d.appliedDamage ?? d.hpDamage ?? 0) > 0) && (d.tokenUuid ?? d.targetUuid)) burned.add(d.tokenUuid ?? d.targetUuid);
+  if (!burned.size) for (const t of [...(wf.hitTargets ?? []), ...(wf.failedSaves ?? []), ...(wf.saves ?? [])]) burned.add((t.document ?? t).uuid);
+  if (!burned.size) return;
+  const choice = await foundry.applications.api.DialogV2.wait({
+    window: { title: "Maddening Flames" },
+    content: `<p>${item.name} dealt Fire damage to ${burned.size} creature(s). Imbue the flames with chaotic energy?</p>`,
+    buttons: [{ action: "Frightened", label: "Frightened" }, { action: "Charmed", label: "Charmed" }, { action: "no", label: "No", default: true }],
+    rejectClose: false
+  });
+  if (!choice || (choice === "no")) return;
+  const activity = feature.system.activities.find(x => x.name.includes(choice)) ?? feature.system.activities.contents[0];
+  if (activity) await MidiQOL.completeActivityUse(activity, {}, { configure: false }, { targetUuids: [...burned] });
+});
+
+/**
  * Bulwark: when a creature with the feat is knocked Prone, its player may use the reaction to stay standing.
  * Run by the active GM; being moved against your will is left to the table.
  */
