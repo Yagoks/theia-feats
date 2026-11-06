@@ -934,6 +934,21 @@ Hooks.on("updateActor", async (actor, changes) => {
     return sayAs(actor, `<strong>Unbroken Body</strong>: ${actor.name} stays on their feet with 1 hit point.`);
   }
 
+  // Necrotic Husk (Theia Undead Warlock): drop to 1 instead, burst of necrotic energy, 1 level of exhaustion.
+  const husk = actor.items.find(i => i.system.identifier === "necrotic-husk");
+  if ((hp === 0) && usesLeft(husk) && !actor.statuses.has("dead")) {
+    if (await askOwner(actor, "Necrotic Husk", `<p>${actor.name} drops to 0 hit points. Use your reaction to drop to 1 instead and erupt with deathly energy?</p>`)) {
+      await spend(husk);
+      const level = actor.classes?.["warlock-theia"]?.system.levels ?? 0;
+      await actor.update({ "system.attributes.hp.value": 1, "system.attributes.exhaustion": Math.min(6, (actor.system.attributes.exhaustion ?? 0) + 1) });
+      const down = actor.effects.filter(e => e.statuses.has("unconscious") || e.statuses.has("dead")).map(e => e.id);
+      if (down.length) await actor.deleteEmbeddedDocuments("ActiveEffect", down);
+      const roll = await new CONFIG.Dice.DamageRoll(`2d10 + ${level}`, {}, { type: "necrotic" }).evaluate();
+      await roll.toMessage({ speaker: ChatMessage.getSpeaker({ actor }), flavor: "Necrotic Husk: creatures of your choice within 30 feet take this necrotic damage" });
+      return sayAs(actor, `<strong>Necrotic Husk</strong>: ${actor.name} drops to 1 hit point instead and gains 1 level of exhaustion. It can be used again after 1d4 long rests.`);
+    }
+  }
+
   const anthro = featNamed(actor, "Anthropomorphic Constitution");
   if ((hp > 0) && (hp <= 20) && usesLeft(anthro) && !actor.effects.some(e => e.name === "Anthropomorphic Constitution")) {
     await spend(anthro);
@@ -946,6 +961,50 @@ Hooks.on("updateActor", async (actor, changes) => {
     return sayAs(actor, `<strong>Anthropomorphic Constitution</strong>: ${actor.name} hardens; damage is reduced for 1 minute.`);
   }
 });
+
+/* -------------------------------------------- */
+/*  Battle Stances and conditional effects      */
+/* -------------------------------------------- */
+
+/**
+ * Battle Stance (Form of Dread, Bladesong, Battle Trance, Blade Dance...): a character can be in one at a time. A stance
+ * is an effect flagged flags.theia.battleStance, or a temporary effect that comes from an item so flagged. Entering one
+ * ends the others, as a new concentration spell ends the previous one.
+ *
+ * flags.theia.whileEffect "<effect name>" on an item's passive effect keeps it on only while the character has an
+ * active effect with that name (Necrotic Husk: immune to necrotic while in the Form of Dread).
+ */
+const isStance = effect => {
+  if (effect.flags?.theia?.battleStance) return true;
+  if (effect.transfer || !effect.origin) return false;
+  const origin = fromUuidSync(effect.origin, { strict: false });
+  const item = origin instanceof Item ? origin : origin?.parent instanceof Item ? origin.parent : null;
+  return !!item?.flags?.theia?.battleStance;
+};
+Hooks.on("createActiveEffect", async effect => {
+  const actor = effect.parent;
+  if (!(actor instanceof Actor) || (game.users.activeGM !== game.user) || !isStance(effect)) return;
+  const others = actor.effects.filter(e => (e.id !== effect.id) && isStance(e)).map(e => e.id);
+  if (!others.length) return;
+  const names = others.map(id => actor.effects.get(id)?.name).join(", ");
+  await actor.deleteEmbeddedDocuments("ActiveEffect", others);
+  await sayAs(actor, `<strong>Battle Stance</strong>: ${actor.name} enters ${effect.name}; ${names} ends (only one Battle Stance at a time).`);
+});
+async function syncWhileEffects(actor) {
+  if (!(actor instanceof Actor) || (game.users.activeGM !== game.user)) return;
+  for (const item of actor.items) {
+    const updates = [];
+    for (const e of item.effects) {
+      const need = e.flags?.theia?.whileEffect;
+      if (!need) continue;
+      const on = actor.appliedEffects.some(x => (x.name === need) && !x.flags?.theia?.whileEffect);
+      if (e.disabled === on) updates.push({ _id: e.id, disabled: !on });
+    }
+    if (updates.length) await item.updateEmbeddedDocuments("ActiveEffect", updates);
+  }
+}
+Hooks.on("createActiveEffect", effect => syncWhileEffects(effect.parent));
+Hooks.on("deleteActiveEffect", effect => syncWhileEffects(effect.parent));
 
 /* -------------------------------------------- */
 /*  Theia class rules                           */
