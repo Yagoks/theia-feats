@@ -921,6 +921,28 @@ Hooks.on("midi-qol.postActiveEffects", async wf => {
 });
 
 /**
+ * Crowkyn Recall (Theia Crowkyn): before a check with a skill the character is proficient in, their player may spend a
+ * use (Proficiency Bonus per long rest) to roll it with advantage. The roll is stopped, the player is asked, and the
+ * check is rolled again (with advantage when they say yes).
+ */
+Hooks.on("dnd5e.preRollSkillV2", (config, dialog, message) => {
+  const actor = config.subject;
+  const skill = config.skill;
+  if (!(actor instanceof Actor) || !skill || config.theiaRecall) return;
+  const recall = actor.items.find(i => i.system.identifier === "crowkyn-recall");
+  if (!recall || !((recall.system.uses?.value ?? 0) > 0) || ((actor.system.skills?.[skill]?.value ?? 0) < 1)) return;
+  if (config.advantage || config.rolls?.[0]?.options?.advantageMode > 0) return;
+  (async () => {
+    const label = CONFIG.DND5E.skills[skill]?.label ?? skill;
+    const use = await foundry.applications.api.DialogV2.confirm({ window: { title: "Crowkyn Recall" },
+      content: `<p>Roll ${label} with advantage? (${recall.system.uses.value} use${recall.system.uses.value === 1 ? "" : "s"} left)</p>`, rejectClose: false });
+    if (use) await recall.update({ "system.uses.spent": (recall.system.uses.spent ?? 0) + 1 });
+    await actor.rollSkill({ skill, theiaRecall: true, advantage: !!use, ability: config.ability }, { configure: dialog?.configure ?? true }, { create: message?.create ?? true });
+  })();
+  return false;
+});
+
+/**
  * Bulwark: when a creature with the feat is knocked Prone, its player may use the reaction to stay standing.
  * Run by the active GM; being moved against your will is left to the table.
  */
