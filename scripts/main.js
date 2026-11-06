@@ -822,6 +822,23 @@ Hooks.on("midi-qol.postCheckSaves", async wf => {
     }
     await sayAs(tActor, `<strong>Indomitable</strong>: ${target.name} rerolls ${reroll.total} vs DC ${dc}, ${reroll.total >= dc ? "a success" : "still a failure"}.`);
   }
+  // Disciplined Survivor (Theia Monk): a target that fails may spend 2 Discipline Points to reroll the save.
+  for (const target of [...(wf.failedSaves ?? [])]) {
+    const tActor = target.actor;
+    const feature = tActor?.items.find(i => i.system.identifier === "disciplined-survivor");
+    const points = tActor?.items.find(i => i.system.identifier === "monks-focus");
+    const roll = rollFor(target);
+    if (!feature || !points || !roll || !Number.isFinite(dc) || ((points.system.uses?.value ?? 0) < 2)) continue;
+    if (!await askOwner(tActor, "Disciplined Survivor", `<p>${target.name} failed the saving throw (${roll.total} vs DC ${dc}). Spend 2 Discipline Points to reroll it?</p>`)) continue;
+    await points.update({ "system.uses.spent": (points.system.uses.spent ?? 0) + 2 });
+    const reroll = await new Roll(roll.formula, roll.data ?? {}).evaluate();
+    await reroll.toMessage({ speaker: ChatMessage.getSpeaker({ actor: tActor }), flavor: "Disciplined Survivor: saving throw reroll" });
+    if (reroll.total >= dc) {
+      wf.failedSaves.delete(target); wf.failedSaves = wf.failedSaves;
+      wf.saves = (wf.saves ?? new Set()).add(target);
+    }
+    await sayAs(tActor, `<strong>Disciplined Survivor</strong>: ${target.name} rerolls ${reroll.total} vs DC ${dc}, ${reroll.total >= dc ? "a success" : "still a failure"}.`);
+  }
   if (!wf.saves?.size) return;
 
   for (const target of [...wf.saves]) {
