@@ -980,6 +980,40 @@ Hooks.on("dnd5e.prepareSpellSlots", (spells, actor, progression) => {
   return false;
 });
 
+// A feature that adds cantrips to a class limit in Spell Book (Thaumaturge): flags.theia.cantripBonus { class, value }.
+async function shiftCantripBonus(item, sign) {
+  const bonus = item.flags?.theia?.cantripBonus, actor = item.parent;
+  if (!bonus?.class || !(actor instanceof Actor) || (game.users.activeGM !== game.user)) return;
+  const path = `flags.spell-book.classRules.${bonus.class}.cantripPreparationBonus`;
+  const now = Number(foundry.utils.getProperty(actor, path) ?? 0);
+  await actor.update({ [path]: Math.max(0, now + sign * Number(bonus.value ?? 1)) });
+}
+Hooks.on("createItem", item => shiftCantripBonus(item, 1));
+
+/**
+ * A feature that spends another feature's uses (Harness Divine Power spends Channel Divinity) points to it by id, and
+ * the id changes on each character. flags.theia.consumes { identifier, placeholder } on the item: when it reaches a
+ * character, its consumption targets that point to the placeholder (or to a missing item) are pointed to the
+ * character's item with that identifier.
+ */
+async function relinkConsumption(actor) {
+  if (!(actor instanceof Actor) || (game.users.activeGM !== game.user)) return;
+  for (const item of actor.items.filter(i => i.flags?.theia?.consumes?.identifier)) {
+    const { identifier, placeholder } = item.flags.theia.consumes;
+    const source = actor.items.find(i => i.system.identifier === identifier && i.id !== item.id);
+    if (!source) continue;
+    const update = {};
+    for (const activity of item.system.activities ?? []) {
+      const targets = activity.consumption?.targets ?? [];
+      if (!targets.some(t => (t.type === "itemUses") && t.target && (t.target !== source.id) && ((t.target === placeholder) || !actor.items.get(t.target)))) continue;
+      update[`system.activities.${activity.id}.consumption.targets`] = targets.map(t => ({ ...(t.toObject?.() ?? t), target: ((t.type === "itemUses") && t.target && ((t.target === placeholder) || !actor.items.get(t.target))) ? source.id : t.target }));
+    }
+    if (Object.keys(update).length) await item.update(update);
+  }
+}
+Hooks.on("createItem", item => { if (item.parent instanceof Actor) setTimeout(() => relinkConsumption(item.parent), 500); });
+Hooks.on("deleteItem", item => shiftCantripBonus(item, -1));
+
 async function applySpellBookRules(actor) {
   for (const cls of actor.items.filter(i => i.type === "class")) {
     const rules = cls.flags?.theia?.spellBookRules;
