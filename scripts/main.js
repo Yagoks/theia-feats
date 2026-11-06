@@ -799,10 +799,30 @@ const sayAs = (actor, text) => ChatMessage.create({ speaker: ChatMessage.getSpea
  */
 Hooks.on("midi-qol.postCheckSaves", async wf => {
   const activity = wf.saveActivity ?? wf.activity;
-  if (!activity?.save || !wf.saves?.size) return;
+  if (!activity?.save) return;
   const dc = activity.save.dc?.value ?? wf.saveDC;
   const rollFor = t => (wf.saveRolls ?? []).find(r => r.options?.["midi-qol"]?.targetUuid === (t.document ?? t).uuid);
   const halfOnSave = activity.damage?.onSave === "half";
+
+  // Indomitable (Theia Fighter): a target that fails may reroll with a bonus of half its Fighter level, once per use.
+  for (const target of [...(wf.failedSaves ?? [])]) {
+    const tActor = target.actor;
+    const feature = tActor?.items.find(i => i.system.identifier === "indomitable");
+    const roll = rollFor(target);
+    if (!feature || !roll || !Number.isFinite(dc) || !((feature.system.uses?.value ?? 0) > 0)) continue;
+    const bonus = Number(tActor.system.scale?.["fighter-theia"]?.["indomitable-bonus"]?.value ?? Math.floor((tActor.classes?.["fighter-theia"]?.system.levels ?? 0) / 2));
+    if (!await askOwner(tActor, "Indomitable", `<p>${target.name} failed the saving throw (${roll.total} vs DC ${dc}). Use Indomitable to reroll it with +${bonus}?</p>`)) continue;
+    await feature.update({ "system.uses.spent": (feature.system.uses.spent ?? 0) + 1 });
+    const reroll = await new Roll(`${roll.formula} + ${bonus}`, roll.data ?? {}).evaluate();
+    await reroll.toMessage({ speaker: ChatMessage.getSpeaker({ actor: tActor }), flavor: `Indomitable: saving throw reroll (+${bonus})` });
+    if (reroll.total >= dc) {
+      wf.failedSaves.delete(target); wf.failedSaves = wf.failedSaves;
+      wf.saves = (wf.saves ?? new Set()).add(target);
+      if (halfOnSave) wf.semiSuperSavers?.delete(target);
+    }
+    await sayAs(tActor, `<strong>Indomitable</strong>: ${target.name} rerolls ${reroll.total} vs DC ${dc}, ${reroll.total >= dc ? "a success" : "still a failure"}.`);
+  }
+  if (!wf.saves?.size) return;
 
   for (const target of [...wf.saves]) {
     const tActor = target.actor;
