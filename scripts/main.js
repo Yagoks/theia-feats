@@ -86,12 +86,29 @@ function requirementParts(text) {
   for (let raw of rest.split("+")) {
     raw = raw.trim().replace(/^[,\s]+|[,\s]+$/g, "");
     if (!raw || /^none$/i.test(raw)) continue;
+    const classFirst = raw.match(/^(?:level\s+(\d+)\+?\s+([A-Za-z' -]+?)|([A-Za-z' -]+?)\s+(\d+)\+?)\s*(?:,\s*(.+))?$/i);
+    const className = classFirst && (classFirst[2] ?? classFirst[3]);
+    if (className && isClassName(className)) {
+      const level = Number(classFirst[1] ?? classFirst[4]);
+      parts.push({ kind: "class", label: `${className.trim()} ${level}`, test: a => Object.values(a.classes ?? {}).some(c => (norm(c.name) === norm(className)) && (c.system.levels >= level)) });
+      if (classFirst[5]) parts.push(readPart(classFirst[5].trim()));
+      continue;
+    }
     for (const piece of /^feat,\s*/i.test(raw) ? [raw.replace(/^feat,\s*/i, "")] : [raw]) parts.push(readPart(piece));
   }
   return parts;
 }
 
+/** Whether a word is the name of a class (in the class features pack or the world). */
+const CLASS_NAMES = new Set(["artificer", "barbarian", "bard", "blood hunter", "cleric", "druid", "fighter", "magus", "monk", "paladin", "ranger", "rogue", "shaman", "sorcerer", "warlock", "wizard"].map(norm));
+const isClassName = name => CLASS_NAMES.has(norm(name));
+
 function readPart(label) {
+  if (/cantrip/i.test(label)) {
+    const named = label.match(/^(.+?)\s+cantrip$/i)?.[1];
+    const specific = named && !/warlock|at least one/i.test(named) ? norm(named) : null;
+    return { kind: "feat", label, test: a => a.items.some(i => (i.type === "spell") && (i.system.level === 0) && (!specific || norm(i.name) === specific)) };
+  }
   const words = alternatives(label.replace(/\d+$/, ""));
   const score = Number(label.match(/(\d+)\s*$/)?.[1]);
   if (score && words.every(w => ABILITY_WORDS[w.toLowerCase()])) {
@@ -124,6 +141,7 @@ function readPart(label) {
   // Anything else is a list of lineages: "Bugbear, Goblin or Hobgoblin", "Drac'nyr (Chromatic)".
   const lineages = options.map(o => norm(o.replace(/\(.*?\)?$/, "")));
   return { kind: "lineage", label, test: a => {
+    if (options.some(o => a.items.some(i => (i.type === "feat") && (norm(i.name) === norm(o))))) return true;
     const race = norm(a.items.find(i => i.type === "race")?.name ?? a.system.details?.race?.name ?? a.system.details?.race);
     return !!race && lineages.some(l => l && (race.includes(l) || l.includes(race)));
   } };
@@ -977,6 +995,18 @@ Hooks.on("dnd5e.prepareSpellSlots", (spells, actor, progression) => {
     const slot = spells[`spell${level}`];
     if (slot && !Number.isNumeric(slot.override)) slot.max = Number(slots);
   }
+  return false;
+});
+
+// Pact Magic slots of a single-class Theia Warlock: flags.theia.pactTable { classLevel: { slots } } (9 and 10: 3 slots).
+Hooks.on("dnd5e.preparePactSlots", (spells, actor, progression) => {
+  const casters = Object.values(actor?.classes ?? {}).filter(c => (c.system.spellcasting?.progression ?? "none") !== "none");
+  if (casters.length !== 1) return;
+  const changes = casters[0].flags?.theia?.pactTable?.[casters[0].system.levels];
+  if (!changes) return;
+  CONFIG.DND5E.spellcasting.pact.prepareSlots(spells, actor, progression);
+  const slot = spells.pact;
+  if (slot && !Number.isNumeric(slot.override) && changes.slots) { slot.max = Number(changes.slots); slot.value = Math.clamp(slot.value ?? 0, 0, slot.max); }
   return false;
 });
 
